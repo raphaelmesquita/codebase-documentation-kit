@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codebase Documentation Maintainer"
+  short_description: "Targeted docs follow-through after changes"
+  default_prompt: "Use $codebase-documentation-maintainer for targeted documentation and memory follow-through based only on the current task changes."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codebase Documentation Architect"
+  short_description: "Bootstrap or migrate lean project docs"
+  default_prompt: "Use $codebase-documentation-architect to bootstrap, align, migrate, or simplify this repository's documentation model without embedding generic maintenance procedures in the repository."
