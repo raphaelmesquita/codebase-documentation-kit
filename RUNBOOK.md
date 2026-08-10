@@ -89,36 +89,40 @@ Hook commands execute with the user's permissions. Review committed project-scop
 
 ## 3. Convert a V1 repository
 
-Start with detection, not manual edits:
+### Standard Codex procedure
 
-```bash
-python runtime/docsctl.py status . --json
-```
+Once the toolkit has been installed in user scope, migration is performed **from the target repository itself**. The original `codebase-documentation-kit` checkout is not needed.
 
-Expected legacy states are `v1-legacy` or `v1-probable`.
+1. Open a terminal in the legacy repository root.
+2. Start Codex normally.
+3. At the Codex prompt, enter:
 
-Plan with no writes:
+   ```text
+   $codebase-documentation-architect
+   ```
 
-```bash
-python migrate.py . --agents both --json
-```
+4. Let the installed architect complete the migration and validation.
 
-Inspect `semantic_review_required`, warnings, and planned actions. Use the real provider scope:
+No path to the toolkit, `runtime/docsctl.py`, `migrate.py`, or `rollback.py` is required for this normal workflow. The installed skill launcher resolves the shared runtime from the user installation automatically.
+
+The architect performs the migration workflow itself:
 
 ```text
---agents codex
---agents claude
---agents both
+$codebase-documentation-architect
+  -> detect current repository model
+  -> derive codex / claude / both provider scope
+  -> plan V1 migration without writing
+  -> apply automatically when unambiguous
+  -> inspect only flagged files when semantic review is required
+  -> validate V2 model
+  -> finish with the repository independent of the toolkit checkout
 ```
 
-Apply only when unambiguous:
+The migrator preserves unrelated project instructions and refuses automatic destructive merging when root agent files or legacy procedure files may contain project-specific facts. Migration backups remain outside the target repository.
 
-```bash
-python migrate.py . --agents both --apply --json
-python runtime/docsctl.py validate . --json
-```
+### Advanced direct CLI
 
-The migrator preserves unrelated project instructions and refuses automatic destructive merging when root agent files or legacy procedure files may contain project-specific facts.
+Direct calls to `runtime/docsctl.py`, `migrate.py`, and `rollback.py` are intended for toolkit development, diagnostics, or recovery. They may be run from a toolkit checkout when needed, but they are **not the standard repository-conversion procedure**.
 
 ## 4. Same-session V1 -> V2 migration
 

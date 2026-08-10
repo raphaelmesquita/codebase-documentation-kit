@@ -115,18 +115,17 @@ For Codex project scope, the installer now emits both the standard POSIX command
 
 ## Convert a repository from V1
 
-Use the providers actually supported by the target repository:
+After the toolkit is installed in user scope, **the standard migration procedure does not use the toolkit checkout**. You do not need to remember where `codebase-documentation-kit` was cloned, and the target repository does not need a copy of the toolkit.
 
-```bash
-python runtime/docsctl.py status /path/to/legacy-repo --json
-python migrate.py /path/to/legacy-repo --agents both --json
-python migrate.py /path/to/legacy-repo --agents both --apply --json
-python runtime/docsctl.py validate /path/to/legacy-repo --json
+From the root of the legacy repository, open Codex and invoke the installed architect skill:
+
+```text
+$codebase-documentation-architect
 ```
 
-Use `--agents claude` or `--agents codex` for single-provider repositories.
+That is the normal migration command. The installed skill uses the shared runtime under your home directory to detect the repository model, derive the active provider scope, plan the V1 migration, apply it when unambiguous, and validate the result. If semantic review is required, it inspects only the flagged repository instructions or legacy procedure documents instead of making destructive guesses.
 
-The converter:
+The migration:
 
 - removes only recognized V1 routing/invocation lines;
 - preserves unrelated root instructions and line endings;
@@ -134,15 +133,11 @@ The converter:
 - refuses destructive guesses for ambiguous layouts;
 - creates an external backup before writes;
 - supports conflict-aware rollback;
-- can be installed before all repositories are migrated.
+- can be performed repository by repository after the global toolkit installation.
 
-If a recognized V1 repository is migrated during a session that already started, the SessionStart hook's legacy baseline allows the Stop hook to evaluate the actual task changes instead of entering an indeterminate-baseline loop.
+If a recognized V1 repository is migrated during the same Codex session that opened it, the SessionStart hook's legacy baseline allows the Stop hook to evaluate the actual task changes instead of entering an indeterminate-baseline loop.
 
-Rollback the newest migration backup with:
-
-```bash
-python rollback.py /path/to/legacy-repo --json
-```
+Direct `runtime/docsctl.py`, `migrate.py`, and `rollback.py` commands are advanced diagnostics and toolkit-development interfaces. They are not required for the normal Codex migration workflow.
 
 ## Cost behavior
 
