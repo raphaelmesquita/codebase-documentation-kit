@@ -217,6 +217,37 @@ class InstallerRegressionTests(unittest.TestCase):
         self.assertFalse((home / ".codex" / "skills" / "codebase-documentation-architect").exists())
         self.assertFalse((home / ".agents").exists())
 
+    @unittest.skipUnless(os.name == "nt", "PowerShell command execution is Windows-specific")
+    def test_user_codex_windows_override_executes_in_powershell(self) -> None:
+        home = self.root / "codex user home with spaces"
+        home.mkdir()
+        result = self.run_installer("--target", "codex", "--scope", "user", home=home)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        config = json.loads((home / ".codex" / "hooks.json").read_text(encoding="utf-8"))
+        for event in ("SessionStart", "Stop"):
+            handler = config["hooks"][event][0]["hooks"][0]
+            self.assertIn("commandWindows", handler)
+            payload = json.dumps({
+                "hook_event_name": event,
+                "source": "startup",
+                "session_id": f"powershell-{event.lower()}",
+                "cwd": str(home),
+                "stop_hook_active": False,
+            })
+            cp = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", handler["commandWindows"]],
+                input=payload,
+                text=True,
+                capture_output=True,
+                cwd=home,
+            )
+            self.assertEqual(
+                cp.returncode,
+                0,
+                f"{event}: {cp.stderr}\ncommandWindows={handler['commandWindows']}",
+            )
+
     def test_project_codex_uses_dotcodex_skills_and_no_agents_directory(self) -> None:
         repo = self.root / "project codex layout"
         repo.mkdir()

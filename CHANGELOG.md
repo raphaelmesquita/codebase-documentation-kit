@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Windows user-scope hooks
+
+- Codex user-scope installation now emits a PowerShell-safe `commandWindows` override while retaining the exact Python interpreter that ran the installer.
+- Added a Windows regression that installs into paths containing spaces and executes both `SessionStart` and `Stop` through PowerShell.
+
 ## 2.1.1 - 2026-08-09
 
 Codex installation-layout migration.

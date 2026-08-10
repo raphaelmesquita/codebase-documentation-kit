@@ -98,7 +98,7 @@ python install.py --target both --scope user --dry-run
 python install.py --target both --scope user
 ```
 
-User scope is recommended for normal local use. It installs the two skills and one shared runtime under your home directory while preserving unrelated hooks and settings.
+User scope is recommended for normal local use. It installs the two skills and one shared runtime under your home directory while preserving unrelated hooks and settings. On Windows, Codex handlers include a PowerShell-safe `commandWindows` override that invokes the exact installer interpreter even when paths contain spaces.
 
 For Codex user scope, the toolkit intentionally uses `~/.codex/skills/`. Current Codex still loads `$CODEX_HOME/skills` for backward compatibility. When Codex is selected, installation also migrates away from the previous `.agents/skills` layout. The reserved product skill names `codebase-documentation-architect` and `codebase-documentation-maintainer` are removed from `.agents/skills` in the same transaction when their `SKILL.md` identifies them by that exact name. This covers the pre-kit V1 architect, locally modified V1 copies, and older/manual kit copies without ownership manifests. Manifest-owned kit copies are verified before removal. Unrelated `.agents` content is preserved, and a same-name path that does not identify itself as the expected skill fails preflight instead of being deleted or left as a duplicate active skill.
 

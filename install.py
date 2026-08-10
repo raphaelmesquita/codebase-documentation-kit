@@ -176,6 +176,10 @@ def quoted(value: str) -> str:
     return shlex.quote(value)
 
 
+def powershell_quoted(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
 def user_runtime() -> Path:
     return Path.home() / ".codebase-documentation-kit" / "runtime"
 
@@ -193,8 +197,15 @@ def command_for(provider: str, scope: str, runtime: Path) -> str:
     return 'python3 "${CLAUDE_PROJECT_DIR}/.codebase-documentation-kit/runtime/hook_claude.py"'
 
 
-def command_windows_for(provider: str, scope: str) -> str | None:
-    if scope != "project" or provider != "codex":
+def command_windows_for(provider: str, scope: str, runtime: Path) -> str | None:
+    if provider != "codex":
+        return None
+    if scope == "user":
+        if os.name != "nt":
+            return None
+        hook = runtime / "hook_codex.py"
+        return f"& {powershell_quoted(sys.executable)} {powershell_quoted(str(hook))}"
+    if scope != "project":
         return None
     # Codex supports a Windows-specific override. Avoid shell-specific git command
     # substitution by locating the nearest Git root in Python, then executing the
@@ -214,8 +225,8 @@ def integrations_for(scope: str, repo: Path | None) -> tuple[dict[str, Integrati
         runtime = user_runtime()
         return (
             {
-                "codex": Integration("codex", home / ".codex" / "hooks.json", home / ".codex" / "skills", command_for("codex", scope, runtime), runtime / "hook_codex.py", command_windows_for("codex", scope)),
-                "claude": Integration("claude", home / ".claude" / "settings.json", home / ".claude" / "skills", command_for("claude", scope, runtime), runtime / "hook_claude.py", command_windows_for("claude", scope)),
+                "codex": Integration("codex", home / ".codex" / "hooks.json", home / ".codex" / "skills", command_for("codex", scope, runtime), runtime / "hook_codex.py", command_windows_for("codex", scope, runtime)),
+                "claude": Integration("claude", home / ".claude" / "settings.json", home / ".claude" / "skills", command_for("claude", scope, runtime), runtime / "hook_claude.py", command_windows_for("claude", scope, runtime)),
             },
             runtime,
             home,
@@ -224,8 +235,8 @@ def integrations_for(scope: str, repo: Path | None) -> tuple[dict[str, Integrati
     runtime = project_runtime(repo)
     return (
         {
-            "codex": Integration("codex", repo / ".codex" / "hooks.json", repo / ".codex" / "skills", command_for("codex", scope, runtime), None, command_windows_for("codex", scope)),
-            "claude": Integration("claude", repo / ".claude" / "settings.json", repo / ".claude" / "skills", command_for("claude", scope, runtime), None, command_windows_for("claude", scope)),
+            "codex": Integration("codex", repo / ".codex" / "hooks.json", repo / ".codex" / "skills", command_for("codex", scope, runtime), None, command_windows_for("codex", scope, runtime)),
+            "claude": Integration("claude", repo / ".claude" / "settings.json", repo / ".claude" / "skills", command_for("claude", scope, runtime), None, command_windows_for("claude", scope, runtime)),
         },
         runtime,
         repo,

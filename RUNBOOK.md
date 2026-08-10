@@ -34,7 +34,7 @@ Claude hooks:       ~/.claude/settings.json
 Shared runtime:     ~/.codebase-documentation-kit/runtime/
 ```
 
-User-scope hooks use the exact Python executable that ran the installer. This is the preferred setup for local Windows use.
+User-scope hooks use the exact Python executable that ran the installer. Codex also receives a PowerShell-safe `commandWindows` override, so quoted executable and runtime paths work correctly on Windows. This is the preferred setup for local Windows use.
 
 ### Codex layout migration from `.agents`
 
