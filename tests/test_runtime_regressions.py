@@ -751,6 +751,90 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.assertIn("standalone `AGENTS.md` means `codex`", skill)
         self.assertIn("--agents <provider-scope>", skill)
 
+    def test_v1_migrated_to_v2_during_same_session_uses_legacy_baseline(self) -> None:
+        self.make_v1(claude=True)
+        hook_common.begin({"cwd": str(self.repo), "session_id": "legacy-transition"})
+        snap, _ = docsctl.load_snapshot(self.repo, "legacy-transition")
+        self.assertIsNotNone(snap, "legacy repositories need a silent baseline for same-session migration")
+
+        result = docsctl.apply_migration(self.repo, docsctl.migration_plan(self.repo, ["codex", "claude"]))
+        self.assertTrue(result["ok"], result)
+        stop = hook_common.evaluate_stop({"cwd": str(self.repo), "session_id": "legacy-transition", "stop_hook_active": False})
+
+        self.assertNotEqual(stop.get("kind"), "impact-indeterminate", stop)
+        self.assertEqual(stop["action"], "allow", stop)
+
+    def test_v1_migration_preserves_same_session_source_impact_and_only_continues_once(self) -> None:
+        self.make_v1(claude=True)
+        (self.repo / "src").mkdir()
+        (self.repo / "src" / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+        commit_all(self.repo, "add source")
+        hook_common.begin({"cwd": str(self.repo), "session_id": "legacy-source-transition"})
+        (self.repo / "src" / "app.py").write_text("VALUE = 2\n", encoding="utf-8")
+        result = docsctl.apply_migration(self.repo, docsctl.migration_plan(self.repo, ["codex", "claude"]))
+        self.assertTrue(result["ok"], result)
+
+        first = hook_common.evaluate_stop({"cwd": str(self.repo), "session_id": "legacy-source-transition", "stop_hook_active": False})
+        second = hook_common.evaluate_stop({"cwd": str(self.repo), "session_id": "legacy-source-transition", "stop_hook_active": True})
+
+        self.assertEqual((first["action"], first["kind"]), ("continue", "review"), first)
+        self.assertIn("src/app.py", first["message"])
+        self.assertEqual(second["action"], "allow", second)
+
+    def test_indeterminate_stop_does_not_repeat_after_hook_continuation(self) -> None:
+        self.make_v2()
+        first = hook_common.evaluate_stop({"cwd": str(self.repo), "session_id": "missing-baseline", "stop_hook_active": False})
+        second = hook_common.evaluate_stop({"cwd": str(self.repo), "session_id": "missing-baseline", "stop_hook_active": True})
+
+        self.assertEqual((first["action"], first["kind"]), ("continue", "impact-indeterminate"))
+        self.assertEqual(second["action"], "allow", second)
+
+    def test_generated_and_language_specific_tests_do_not_trigger_maintenance(self) -> None:
+        self.make_v2()
+        generated = [
+            ".next/cache/data.bin",
+            "coverage/coverage.json",
+            "out/app.js",
+            "target/release/app",
+            "package-lock.json",
+            "pnpm-lock.yaml",
+            "go.sum",
+        ]
+        tests = ["pkg/handler_test.go", "spec/unit/widget_spec.rb", "Project.Tests/Widget.cs"]
+        for rel in generated + tests:
+            path = self.repo / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("baseline\n", encoding="utf-8")
+        commit_all(self.repo, "classification fixtures")
+        docsctl.snapshot(self.repo, "classify-expanded")
+        for rel in generated + tests:
+            path = self.repo / rel
+            path.write_text("changed\n", encoding="utf-8")
+
+        report = docsctl.impact_report(self.repo, docsctl.load_snapshot(self.repo, "classify-expanded")[0])
+
+        self.assertFalse(report["needs_documentation_review"], report)
+        self.assertEqual(report["categories"].get("generated"), len(generated), report)
+        self.assertEqual(report["categories"].get("tests"), len(tests), report)
+
+    def test_modifying_existing_documentation_is_not_misclassified_as_structure_change(self) -> None:
+        self.make_v2()
+        docsctl.snapshot(self.repo, "docs-edit")
+        docs_index = self.repo / "docs" / "README.md"
+        docs_index.write_text(docs_index.read_text(encoding="utf-8") + "\nEditorial clarification.\n", encoding="utf-8")
+
+        report = docsctl.impact_report(self.repo, docsctl.load_snapshot(self.repo, "docs-edit")[0])
+
+        self.assertEqual(report["categories"], {"docs": 1}, report)
+        self.assertFalse(report["needs_documentation_review"], report)
+
+    def test_architect_finish_keeps_derived_provider_scope(self) -> None:
+        skill = (ROOT / "skills" / "codebase-documentation-architect" / "SKILL.md").read_text(encoding="utf-8")
+        finish = skill.split("## Finish", 1)[1]
+        self.assertIn("--agents <provider-scope>", finish)
+        self.assertNotIn("--agents both", finish)
+        self.assertIn("if scaffold already created it", finish.lower())
+
 
 if __name__ == "__main__":
     unittest.main()

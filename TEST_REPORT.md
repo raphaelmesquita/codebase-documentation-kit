@@ -1,102 +1,85 @@
-# Relatório completo de testes — Codebase Documentation Kit V2 Tested
+# Stable Release Test Report - Codebase Documentation Kit 2.1.1
 
-Data: 2026-08-09
+Date: 2026-08-09
 
-Veredito final: **PASS**
+## Verdict
 
-Artefato: `codebase-documentation-kit-v2-tested.zip`
+**PASS for package-level stable release**, with live-host limitations documented separately.
 
-## Resumo executivo
+## Basis
 
-Os dois ZIPs em `inputs/` foram tratados como evidência imutável e seus SHA-256 foram confirmados antes do trabalho:
+The stable work started from `raphaelmesquita/codebase-documentation-kit` at commit `dd85be263306b0f6f0e2ff192fb1cd9978af4f88` (the current `main` when this release work began) and the previously Work-tested V2 artifact. Core runtime, installer, skill, and test file Git blob hashes matched the tested artifact before the stable delta was applied.
 
-- V1: `1F94BD00DF292EE3BF5C191D50A972DFD2B968CE53B34F9D9CEB70BD0E456A14`
-- V2 candidato: `3C6EC1F906843F387A6AC043306AC066C139F1D2CEF634D9650A028C2B4B5704`
+Current OpenAI Codex hook documentation was rechecked for `SessionStart`, `Stop`, `stop_hook_active`, project hook root resolution, and `commandWindows`. Current Claude Code documentation was rechecked for `Stop`, `stop_hook_active`, `hookSpecificOutput.additionalContext`, `${CLAUDE_PROJECT_DIR}`, and project command behavior.
 
-Seis revisores iniciais trabalharam sobre cópias isoladas. A suíte original passou 14/14, mas os testes adversariais encontraram falhas reais de migração/rollback, ownership e atomicidade do instalador, detecção de impacto, validação e escopo de provedor. As correções foram integradas com regressões; rodadas adversariais sequenciais adicionais encontraram e fecharam bordas de links/paths, falha transacional, retry e interrupções.
+## Stable changes under test
 
-Resultado final na árvore canônica: **46/46 testes passaram**. O próprio ZIP final foi então extraído em um diretório novo e a mesma suíte passou **46/46** em 20,752 s. Uma fixture focada de migração+rollback passou separadamente. Dry-runs user/project criaram **0 arquivos** nos dois alvos.
+The 2.1 stable line closes the remaining release-candidate findings. Release 2.1.1 additionally migrates the Codex installation layout from `.agents/skills` to `.codex/skills`:
 
-## Ambiente e fontes oficiais
+1. V1 -> V2 migration during the same session no longer loses its baseline or enters a missing-snapshot continuation loop.
+2. Source changes made before same-session migration remain visible to the semantic maintenance gate.
+3. Architect finish instructions preserve the derived Codex/Claude provider scope.
+4. Codex project hooks include a Windows-specific command override.
+5. Tests execute the installed POSIX hook commands from nested repository directories.
+6. Common generated outputs and language-specific tests are filtered deterministically.
+7. Editing an existing doc is distinguished from adding/deleting/renaming documentation structure.
+8. Codex skills install only under `.codex/skills`; existing `config.toml` content is left unchanged by skill placement.
+9. The standalone V1 architect and older/manual kit copies under `.agents/skills` are removed transactionally when their `SKILL.md` declares one of the exact reserved product skill names; unrelated `.agents` content is preserved.
+10. A same-name `.agents` path that does not identify itself as the expected reserved skill blocks installation rather than being deleted or left as a duplicate.
+11. Claude-only installation does not perform Codex legacy-layout cleanup.
 
-- Windows 11; Python 3.14; Git 2.55; `core.longpaths=true` durante a suíte.
-- OpenAI Skills: estrutura baseada em diretório com `SKILL.md`, nome e descrição confrontada com [Build skills](https://learn.chatgpt.com/docs/build-skills) (acesso em 2026-08-09).
-- OpenAI Hooks: locais/configuração, eventos SessionStart/Stop, silêncio em sucesso e resposta de bloqueio confrontados com [Hooks](https://learn.chatgpt.com/docs/hooks) (acesso em 2026-08-09).
-- Claude Code Skills/commands: layout e descoberta confrontados com [Slash commands / skills](https://code.claude.com/docs/en/slash-commands) (acesso em 2026-08-09).
-- Claude Code Hooks: matchers, Stop e `hookSpecificOutput.additionalContext` confrontados com [Hooks reference](https://code.claude.com/docs/en/hooks) (acesso em 2026-08-09).
+## Test count
 
-Todos os testes de hook foram **simulações de payload**, não execuções em host real.
+The suite contains **63 tests** across:
 
-## Matriz mínima
+- `tests/test_kit.py`
+- `tests/test_runtime_regressions.py`
+- `tests/test_installer_regressions.py`
 
-| ID | Resultado | Evidência principal |
-|---|---|---|
-| M01 | PASS | V1 conhecido planejado/migrado; integração Codex+Claude |
-| M02 | PASS | regras customizadas e bytes/CRLF preservados; referência ambígua não apagada |
-| M03 | PASS | migração Claude-only |
-| M04 | PASS | custom `CLAUDE.md` exige revisão semântica |
-| M05 | PASS | procedure docs com possível fato impedem deleção automática |
-| M06 | PASS | segunda migração retorna already-v2 sem novo backup |
-| M07 | PASS | restauração exata, remoção de criados e conflitos pós-migração |
-| M08 | PASS | falhas, compensação, retry e `KeyboardInterrupt` transacionais |
-| I01 | PASS | source modificado sinaliza revisão |
-| I02 | PASS | test-only não sinaliza manutenção sem impacto |
-| I03 | PASS | dist/build/minificados tratados como gerados |
-| I04 | PASS | dirty worktree e mudança apenas no índice são detectadas |
-| I05 | PASS | dirty file intocado não é atribuído à sessão |
-| I06 | PASS | source untracked detectado |
-| I07 | PASS | deleção tracked detectada |
-| I08 | PASS | rename tracked preserva significado |
-| I09 | PASS | dívida de link preexistente não vira novo blocker |
-| I10 | PASS | novo link quebrado inline/imagem/referência vira blocker |
-| I11 | PASS | ausência de Git explicitamente indeterminada |
-| I12 | PASS | modelo ausente/malformado é seguro e diagnosticado |
-| C01 | PASS (simulado) | SessionStart Codex gera snapshot e payload válido |
-| C02 | PASS (simulado) | Stop Codex sem impacto é silencioso/mínimo |
-| C03 | PASS (simulado) | impacto semântico gera uma continuação direcionada |
-| C04 | PASS (simulado) | regressão determinística nova gera blocker exato |
-| C05 | PASS | hooks Codex alheios preservados no ciclo completo |
-| A01 | PASS (simulado) | SessionStart Claude válido |
-| A02 | PASS (simulado) | Stop Claude sem impacto é silencioso/mínimo |
-| A03 | PASS (simulado) | feedback adicional/continuação Claude conforme protocolo |
-| A04 | PASS | settings/hooks Claude alheios preservados |
-| P01 | PASS | dry-run user both; zero entradas criadas |
-| P02 | PASS | dry-run project both; zero entradas criadas |
-| P03 | PASS | Codex depois Claude com runtime compartilhado |
-| P04 | PASS | Claude depois Codex com runtime compartilhado |
-| P05 | PASS | uninstall de um alvo preserva o outro |
-| P06 | PASS | reinstall/update idempotente e transacional |
-| P07 | PASS | caminhos com espaços e troca de interpretador |
-| P08 | PASS | ZIP com raiz única, 28 entradas, extração limpa |
-| P09 | PASS | 46/46 testes do ZIP extraído |
-| S01 | PASS | frontmatter/nome/descrição e launchers válidos |
-| S02 | PASS | maintainer 1.794 bytes vs. V1 25.631 bytes |
-| S03 | PASS | referência pesada só no fluxo de arquitetura |
-| S04 | PASS | root docs não obrigam architect após toda tarefa |
-| S05 | PASS (simulado) | hooks de sucesso sem contexto desnecessário |
+On the stable validation host:
 
-## Regressões acrescentadas
+```text
+Ran 63 tests
+OK (skipped=1)
+```
 
-32 testes foram adicionados ao baseline de 14, cobrindo: preservação byte-a-byte; layouts ambíguos; no-op V2; rollback conflict-aware; path traversal; symlink/reparse/hardlink; restauração após falhas de múltiplas etapas; retry após recuperação falha; interrupções e dupla falha; índice Git staged; classificação generated; parser Markdown; modelo malformado; dívida duplicada; snapshot ausente/corrompido; required paths inválidos; reutilização da validação; ownership de árvores/hooks; preflight; transação do instalador; junction escape; troca de interpretador.
+The single skip is the Windows-junction-specific regression. It is platform-gated by design. All other tests passed.
 
-## Rodadas adversariais e disposição
+## New 2.1 regressions
 
-- Revisão inicial A–F: REQUEST_CHANGES; todos os achados reproduzíveis foram triados.
-- Rodadas 1–5: corrigiram deleções/conflitos de rollback, dívida duplicada, snapshot ausente, junction/hardlink, CRLF, atomicidade, ownership de interpretador e retry público.
-- Rodada 6: encontrou interrupção parcial em migração/rollback/installer e mudança invisível no índice; corrigidos com três regressões.
-- Rodada 7: encontrou dupla falha que engolia `KeyboardInterrupt`; corrigida com propagação, nota diagnóstica, baseline residual e regressão.
-- Alegação de que Claude `additionalContext` seria inválido foi rejeitada após confronto com a documentação oficial atual, que o aceita como feedback não bloqueante.
+- same-session V1 migration uses a legacy SessionStart baseline;
+- same-session source impact survives migration and requests only one semantic continuation;
+- a missing baseline does not request another continuation when `stop_hook_active` is already true;
+- generated/test classification covers `.next`, coverage/output/target caches, dependency lock artifacts, Go tests, Ruby specs, and `.Tests` path segments;
+- ordinary modification of existing documentation does not count as structural change;
+- architect Finish section contains `<provider-scope>` and no hardcoded `--agents both`;
+- Codex project handlers contain `commandWindows`;
+- actual installed POSIX Codex and Claude SessionStart commands execute successfully from a nested repository directory.
+- Codex user and project skills are installed under `.codex/skills` with no toolkit installation created under `.agents`;
+- locally modified V1 architect copies are removed when their `SKILL.md` still declares the reserved `codebase-documentation-architect` name;
+- pre-manifest/manual maintainer copies are removed when their `SKILL.md` declares the reserved `codebase-documentation-maintainer` name;
+- pre-existing Codex `config.toml` content remains byte-for-byte unchanged by skill placement;
+- unmodified and locally modified V1 architect copies, pre-manifest/manual kit copies, and manifest-owned V2 toolkit skills are removed from `.agents/skills` during Codex layout migration;
+- unrelated `.agents` skills survive the migration;
+- ambiguous same-name `.agents` collisions fail before new installation writes;
+- project dry-run reports legacy cleanup with zero writes;
+- Claude-only installation leaves `.agents` untouched.
 
-## Gate do artefato final
+## Retained coverage from the Work-tested candidate
 
-- Tamanho: 58.967 bytes.
-- SHA-256: `E2ACDA27C1A0DDBCF40C9A35829081FBFBCA4C73586D850E0746FE5F20CDB6D9`.
-- 28 entradas ZIP; 26 arquivos de toolkit.
-- Nenhum `__pycache__`, `.pytest_cache`, `.pyc`, `.pyo` ou `.git` no ZIP.
-- Nenhum segredo, credencial ou caminho absoluto específico da máquina encontrado na varredura textual.
-- Extração nova do ZIP: 46/46 testes PASS.
-- Teste focal `test_migration_rollback_restores_and_removes_created_marker`: PASS.
-- Dry-run user both: PASS, 0 escritas.
-- Dry-run project both: PASS, 0 escritas.
+The existing regression suite continues to cover migration ambiguity, byte/CRLF preservation, rollback conflicts, hard links/reparse points, transaction compensation, staged-index changes, untracked/deleted/renamed files, pre-existing documentation debt, Markdown links, malformed models, required-path failures, ownership manifests, multi-target install order, uninstall isolation, dry-run zero writes, and Python-interpreter changes for user scope.
 
-As limitações de ambiente e cobertura estão separadas em `KNOWN_LIMITATIONS.md`.
+## Package gate
+
+The release packaging procedure additionally requires:
+
+- Python compilation of runtime/install entry points;
+- test execution before packaging;
+- exclusion of `__pycache__`, `.pyc`, `.pyo`, `.pytest_cache`, `.git`, and other build caches;
+- a clean extraction of the produced ZIP;
+- a second test run from that extracted ZIP;
+- SHA-256 generation for the final artifact.
+
+## Limitations
+
+See `KNOWN_LIMITATIONS.md`. Most importantly, host contracts are simulated and command strings are smoke-tested, but a full interactive Codex/Claude host session was not available in this environment.

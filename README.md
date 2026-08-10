@@ -1,48 +1,51 @@
-# Codebase Documentation Kit v2
+# Codebase Documentation Kit 2.1.1
 
 A low-context documentation maintenance toolkit for Codex and Claude Code.
 
-The kit separates rare documentation architecture work from frequent task-end maintenance and moves deterministic work out of the model context.
+The kit separates rare documentation architecture work from frequent task-end maintenance and moves deterministic inventory, Git impact detection, validation, migration, rollback, and installation work out of model context.
 
-## What changed from V1
+## Why this exists
 
-V1 coupled routine completion maintenance to `codebase-documentation-architect` through root agent instructions and then loaded a large checklist and maintenance reference. V2 changes the control flow:
+The original V1 skill coupled routine completion maintenance to a large architecture skill through always-loaded repository instructions. V2 replaces that flow with deterministic lifecycle hooks and two skills with very different frequencies:
 
-1. `SessionStart` records a silent Git-aware baseline outside the repository.
+1. `SessionStart` captures a silent Git-aware baseline.
 2. Work proceeds normally with no per-tool documentation hooks.
-3. `Stop` compares the final repository state to the baseline.
-4. Test-only or generated-only changes finish silently.
-5. Source/config/structural changes receive one compact continuation asking the small maintainer skill for targeted review.
-6. Deterministic validation failures introduced by the task are reported directly and compactly.
-7. The second stop is allowed after the maintainer has had one chance to decide whether documentation is actually needed.
+3. `Stop` compares the repository with the baseline.
+4. Test-only, generated-only, and ordinary documentation-only edits can finish silently.
+5. Source/config/structural changes receive at most one compact semantic review continuation in the normal flow.
+6. New deterministic documentation-model failures are reported directly.
+7. Successful hooks add no model-visible context.
 
-Successful hooks emit no model-visible context.
+Recognized V1 repositories may receive a silent baseline before migration so that a V1 -> V2 conversion performed during the same session does not lose attribution of task changes. Completion gating remains inert while the repository is still V1.
 
 ## Package layout
 
 ```text
-codebase-documentation-kit-v2/
-  README.md
-  RUNBOOK.md
-  install.py
-  migrate.py
-  rollback.py
-  runtime/
-    docsctl.py
-    hook_common.py
-    hook_codex.py
-    hook_claude.py
-  skills/
-    codebase-documentation-architect/
-    codebase-documentation-maintainer/
-  tests/
+README.md
+RUNBOOK.md
+CHANGELOG.md
+COST_MODEL.md
+KNOWN_LIMITATIONS.md
+TEST_REPORT.md
+install.py
+migrate.py
+rollback.py
+runtime/
+  docsctl.py
+  hook_common.py
+  hook_codex.py
+  hook_claude.py
+skills/
+  codebase-documentation-architect/
+  codebase-documentation-maintainer/
+tests/
 ```
 
 ## Two skills, two frequencies
 
 ### `codebase-documentation-architect`
 
-Use for first bootstrap, architecture/alignment, V1 conversion, and structural simplification. It may read the optional architecture reference when needed.
+Use for first bootstrap, architecture/alignment, V1 conversion, and structural simplification. It may read the optional architecture reference when needed. Provider scope is derived from the actual repository and is preserved through scaffold, migration, and final marking.
 
 ### `codebase-documentation-maintainer`
 
@@ -55,15 +58,15 @@ Use only after a completion hook requests review, or when explicitly requested. 
 - `status`: detect untreated, probable V1, legacy V1, or V2 state;
 - `scan`: compact repository inventory for architecture work;
 - `migrate`: plan or apply known-safe V1 transformations;
-- `rollback`: restore the latest migration backup;
+- `rollback`: restore a migration backup safely;
 - `scaffold`: create only missing low-risk V2 skeleton files;
-- `mark`: add the V2 machine-readable marker;
+- `mark`: add or update the V2 machine-readable marker;
 - `validate`: check model invariants and active local Markdown links;
 - `session-start`: capture a Git-aware task baseline;
 - `impact`: compare a session against that baseline;
 - `session-finalize`: reset a session baseline.
 
-It uses only the Python standard library.
+The runtime uses only the Python standard library.
 
 ## Repository model
 
@@ -74,96 +77,95 @@ V2 uses:
 - `docs/README.md` as the documentation router;
 - `MEMORY.md` only for high-signal cross-session steering context;
 - `docs/state/` only when durable state really exists;
-- `.docsctl.json` as a machine-readable marker that agents do not need to read normally.
+- `.docsctl.json` as a machine-readable model marker that agents normally do not need to read.
 
-A V2 repository does not reference either toolkit skill by name in `AGENTS.md` or `CLAUDE.md`. This removes repository coupling to future skill names and versions.
+A V2 repository does not reference either toolkit skill by name in `AGENTS.md` or `CLAUDE.md`. Toolkit upgrades therefore do not normally require repository-instruction migrations.
 
 ## Requirements
 
 - Python 3.10 or newer.
-- Git for automatic session impact detection. Bootstrap, migration, and validation can still run without Git, but completion gating is designed for Git repositories.
+- Git for automatic session impact detection.
+- For project-scope hooks, the committed environment must expose Python to the generated hook command. Codex has separate POSIX and Windows commands; Claude project scope is optimized for POSIX/cloud environments. See [RUNBOOK.md](RUNBOOK.md).
 
-## Install the kit
+Bootstrap, migration, and validation can still run without Git, but automatic completion gating is Git-oriented.
 
-Clone this private repository on a machine where your GitHub account has access:
+## Install
 
-```bash
-git clone https://github.com/raphaelmesquita/codebase-documentation-kit.git
-cd codebase-documentation-kit
-```
-
-Choose the providers you use: `codex`, `claude`, or `both`. Preview the user-level installation first, then apply it:
+Preview before writing:
 
 ```bash
 python install.py --target both --scope user --dry-run
 python install.py --target both --scope user
 ```
 
-User scope is recommended for normal local use, especially on Windows. It installs the two skills and one shared runtime under your home directory while preserving unrelated hooks and settings.
+User scope is recommended for normal local use. It installs the two skills and one shared runtime under your home directory while preserving unrelated hooks and settings.
 
-Use project scope only when the integration must travel with a repository, such as a cloned remote/cloud environment:
+For Codex user scope, the toolkit intentionally uses `~/.codex/skills/`. Current Codex still loads `$CODEX_HOME/skills` for backward compatibility. When Codex is selected, installation also migrates away from the previous `.agents/skills` layout. The reserved product skill names `codebase-documentation-architect` and `codebase-documentation-maintainer` are removed from `.agents/skills` in the same transaction when their `SKILL.md` identifies them by that exact name. This covers the pre-kit V1 architect, locally modified V1 copies, and older/manual kit copies without ownership manifests. Manifest-owned kit copies are verified before removal. Unrelated `.agents` content is preserved, and a same-name path that does not identify itself as the expected skill fails preflight instead of being deleted or left as a duplicate active skill.
+
+Project scope is intended when the integration itself must travel with the repository, including remote/cloud environments:
 
 ```bash
 python install.py --target both --scope project --repo /path/to/repo --dry-run
 python install.py --target both --scope project --repo /path/to/repo
 ```
 
-Project scope writes `.agents/`, `.codex/`, `.claude/`, and `.codebase-documentation-kit/` inside the target repository. Review and commit those generated files deliberately. Project hook commands expect `python3`; for local Windows use, prefer user scope unless `python3` is available in the project shell.
+Project scope writes `.codex/`, `.claude/`, and `.codebase-documentation-kit/` inside the target repository. Codex skills are installed under `.codex/skills`; the installer does not install this toolkit under `.agents`. Review and commit generated project-scope files deliberately.
 
-## Convert a repository from the legacy skill
+For Codex project scope, the installer now emits both the standard POSIX command and the supported `commandWindows` override. For Claude Code project scope, the hook uses `${CLAUDE_PROJECT_DIR}` and `python3`, which is appropriate for the intended POSIX/cloud deployment. Prefer user scope for native local Windows Claude Code unless the project shell provides `python3`.
 
-Run these commands from this toolkit checkout. Replace `/path/to/legacy-repo` and select the providers actually used by that repository.
+## Convert a repository from V1
 
-1. Start from a clean Git worktree or commit/stash unrelated changes.
-2. Detect the current documentation model:
+Use the providers actually supported by the target repository:
 
-   ```bash
-   python runtime/docsctl.py status /path/to/legacy-repo --json
-   ```
+```bash
+python runtime/docsctl.py status /path/to/legacy-repo --json
+python migrate.py /path/to/legacy-repo --agents both --json
+python migrate.py /path/to/legacy-repo --agents both --apply --json
+python runtime/docsctl.py validate /path/to/legacy-repo --json
+```
 
-3. Generate a migration plan with no writes:
+Use `--agents claude` or `--agents codex` for single-provider repositories.
 
-   ```bash
-   python migrate.py /path/to/legacy-repo --agents both --json
-   ```
+The converter:
 
-4. Inspect `semantic_review_required`, `warnings`, and the planned actions. Do not force an ambiguous migration as a routine shortcut.
-5. If the plan is unambiguous, apply it and validate:
+- removes only recognized V1 routing/invocation lines;
+- preserves unrelated root instructions and line endings;
+- keeps a valid `CLAUDE.md` shim when appropriate;
+- refuses destructive guesses for ambiguous layouts;
+- creates an external backup before writes;
+- supports conflict-aware rollback;
+- can be installed before all repositories are migrated.
 
-   ```bash
-   python migrate.py /path/to/legacy-repo --agents both --apply --json
-   python runtime/docsctl.py validate /path/to/legacy-repo --json
-   ```
+If a recognized V1 repository is migrated during a session that already started, the SessionStart hook's legacy baseline allows the Stop hook to evaluate the actual task changes instead of entering an indeterminate-baseline loop.
 
-6. Review `git diff`, run the target repository's own tests, and commit the conversion separately from unrelated product work.
-
-The migration creates an external backup before its first write. To restore the newest backup:
+Rollback the newest migration backup with:
 
 ```bash
 python rollback.py /path/to/legacy-repo --json
 ```
 
-The converter removes only recognized V1 routing/invocation lines, preserves unrelated root instructions, and refuses destructive guesses when `AGENTS.md`, `CLAUDE.md`, or legacy procedure documents may contain project-specific facts. Installing V2 before converting repositories is safe: hooks remain inert until a repository has a valid `.docsctl.json` marker.
+## Cost behavior
 
-For standalone Claude repositories use `--agents claude`; for Codex-only repositories use `--agents codex`.
+The routine maintainer skill remains 1,794 bytes / 249 whitespace-separated words, about 93% smaller by raw instruction size than the V1 forced completion path measured for this project. Successful hooks add zero model-visible context.
 
-## Inspect and operate manually
+Release 2.1 expands deterministic classification for common generated outputs and language-specific tests, reducing unnecessary maintainer calls for paths such as `.next/`, `coverage/`, `target/`, `package-lock.json`, `pnpm-lock.yaml`, `*_test.go`, and `*_spec.rb`.
 
-Inspect before writing:
+See [COST_MODEL.md](COST_MODEL.md) for the measured model.
 
-```bash
-python runtime/docsctl.py status /path/to/repo --json
-python runtime/docsctl.py migrate /path/to/repo --agents both --json
-```
+## Verification
 
-See [RUNBOOK.md](RUNBOOK.md) for installation, migration, rollback, trust, updates, uninstall, and troubleshooting.
+The stable release adds workflow regressions on top of the Work-tested candidate, including:
 
-## Verification and release evidence
+- V1 -> V2 migration inside the same live session baseline;
+- single-continuation behavior when a baseline is missing;
+- preservation of source impact across same-session migration;
+- Claude-only provider-scope finish instructions;
+- Codex `commandWindows` generation;
+- execution of the actual installed POSIX project hook commands from a repository subdirectory;
+- expanded generated/test classification;
+- documentation edit versus documentation-structure distinction.
 
-- [TEST_REPORT.md](TEST_REPORT.md): complete test matrix and clean-ZIP verification.
-- [CHANGELOG.md](CHANGELOG.md): fixes relative to the initial V2 candidate.
-- [COST_MODEL.md](COST_MODEL.md): instruction and operational cost model.
-- [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md): environment and coverage boundaries.
+See [TEST_REPORT.md](TEST_REPORT.md), [CHANGELOG.md](CHANGELOG.md), and [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md).
 
 ## Design constraints
 
@@ -171,5 +173,6 @@ See [RUNBOOK.md](RUNBOOK.md) for installation, migration, rollback, trust, updat
 - Session cache and migration backups live outside target repositories.
 - The migrator never overwrites unrelated root agent instructions wholesale.
 - Ambiguous `AGENTS.md` / `CLAUDE.md` layouts require semantic review.
-- Pre-existing validation failures do not block an unrelated task; only new deterministic failures introduced after the session baseline are completion blockers.
+- Pre-existing deterministic validation failures do not block an unrelated task.
+- Missing/indeterminate baselines do not create an endless Stop loop.
 - V1 procedure docs containing possible project facts are not auto-deleted.

@@ -1,9 +1,12 @@
-# Limitações conhecidas
+# Known Limitations
 
-- Hooks Codex e Claude foram validados por payloads simulados e confronto com documentação oficial; não houve execução dentro de hosts Codex/Claude reais nesta máquina. Os resultados não são apresentados como prova live-host.
-- A validação dinâmica principal ocorreu em Windows 11, Python 3.14 e Git 2.55. Comandos POSIX/Linux e o uso de `python3` em project scope foram inspecionados estaticamente, não executados em Linux/macOS.
-- Junctions e hard links foram testados no Windows. Symlinks dependentes de privilégio foram simulados quando o ambiente não permitiu criá-los; o comportamento POSIX de symlink não foi executado nativamente.
-- Interrupções foram injetadas como `KeyboardInterrupt` em processo, não geradas por sinal real do terminal ou encerramento abrupto do sistema operacional. Queda de energia entre operações não pode ser provada pelo harness.
-- O scanner Markdown é deliberadamente determinístico e não pretende implementar toda a gramática CommonMark; cobre os casos reproduzidos da matriz (inline, imagem, referência, parênteses balanceados e exclusão de código).
-- Métricas de custo usam bytes UTF-8 e palavras separadas por espaço. Tokens e custo financeiro variam conforme modelo, tokenizer, contexto do host e conteúdo do repositório.
-- O toolkit evita sobrescrever árvores estrangeiras/modificadas. Nesses casos, atualização ou remoção requer intervenção manual consciente em vez de merge automático.
+- Codex 2.1.1 intentionally installs skills in `$CODEX_HOME/skills` (`~/.codex/skills`) rather than the newer `.agents/skills` convention. The current Codex implementation still loads `$CODEX_HOME/skills` for backward compatibility, but upstream could eventually remove that compatibility path; revalidate this choice when upgrading Codex. Project `.codex/skills` is loaded through the project config-folder skill root.
+- Codex and Claude hook payload/output contracts are verified against current official documentation and through simulated hook invocations. This environment did not run a full interactive Codex or Claude Code host session.
+- The stable suite executes the actual installed POSIX project hook command strings from nested directories. The Codex `commandWindows` structure is tested, but the Windows command itself was not executed in this Linux validation environment.
+- Claude Code project scope remains intentionally POSIX/cloud-oriented and invokes `python3` with `${CLAUDE_PROJECT_DIR}`. For native local Windows Claude Code, user scope is recommended unless `python3` is available in the shell.
+- The current validation run is non-Windows, so the Windows-junction regression is skipped here. The prior Work adversarial run executed the junction-specific case on Windows; symlink/junction semantics should still be rechecked if filesystem behavior changes.
+- Interruption tests inject `KeyboardInterrupt` in-process; abrupt OS termination or power loss between filesystem operations cannot be proven by the harness.
+- The Markdown scanner is deliberately deterministic rather than a full CommonMark implementation. It covers the link/image/reference/code cases in the regression matrix.
+- Generated/test classification uses conservative built-in conventions rather than repository-specific glob configuration. Unusual generated paths may still trigger one semantic review until added to the deterministic classifier.
+- Cost metrics use UTF-8 bytes and whitespace-separated words. Actual token counts and financial cost depend on host context, model, tokenizer, and repository contents.
+- For active destination trees under `.codex/skills` and `.claude/skills`, the installer refuses to overwrite foreign or locally modified owned trees. The `.agents/skills` migration is intentionally different: exact reserved product skill identities are removed there because that location is being retired for this product.

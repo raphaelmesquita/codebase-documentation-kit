@@ -1,277 +1,285 @@
 # Installation and Migration Runbook
 
-## 0. Clone and verify prerequisites
+## 0. Verify prerequisites
 
 ```bash
-git clone https://github.com/raphaelmesquita/codebase-documentation-kit.git
-cd codebase-documentation-kit
 python --version
 git --version
 python -m unittest discover -s tests -v
 ```
 
-Python 3.10+ is required. Git is required for automatic session impact detection. Run installer and migration commands from this checkout; target repositories do not need a copy of the toolkit when user scope is used.
+Python 3.10+ is required. Git is required for automatic session impact detection.
 
 ## 1. Choose deployment scope
 
 ### User scope
 
-Use when you want the toolkit available across local repositories without committing the toolkit itself into each repository.
+Use user scope for normal local development across many repositories:
 
 ```bash
-python install.py --target codex --scope user
-python install.py --target claude --scope user
+python install.py --target codex --scope user --dry-run
+python install.py --target claude --scope user --dry-run
+python install.py --target both --scope user --dry-run
+
 python install.py --target both --scope user
 ```
 
-The installer preserves unrelated existing hooks and replaces only hook handlers owned by this toolkit.
-
-User-scope locations:
+Locations:
 
 ```text
-Codex skills:       ~/.agents/skills/
+Codex skills:       ~/.codex/skills/
 Codex hooks:        ~/.codex/hooks.json
 Claude skills:      ~/.claude/skills/
 Claude hooks:       ~/.claude/settings.json
 Shared runtime:     ~/.codebase-documentation-kit/runtime/
 ```
 
-The generated hook commands use the exact Python executable that ran the installer, which is preferable on local Windows installations.
+User-scope hooks use the exact Python executable that ran the installer. This is the preferred setup for local Windows use.
+
+### Codex layout migration from `.agents`
+
+Release 2.1.1 installs Codex skills under `.codex/skills`, not `.agents/skills`. On every install or uninstall where Codex is selected, the installer checks the old `.agents/skills` locations for this toolkit.
+
+- the V1 `codebase-documentation-architect` is removed whenever its `SKILL.md` declares that exact skill name, including locally modified pre-manifest copies;
+- prior/manual `codebase-documentation-architect` and `codebase-documentation-maintainer` copies without manifests are also removed when their `SKILL.md` declares the exact reserved product name;
+- manifest-owned kit architect/maintainer installations are verified and removed;
+- unrelated skills or other `.agents` content are preserved;
+- if a reserved same-name directory does not actually identify itself as the expected skill, preflight fails before installing the new copy;
+- dry-run reports the legacy removal but performs no write.
+
+A successful Codex installation therefore leaves neither the old standalone architect skill nor an older kit copy active under `.agents/skills`. Claude-only installation does not perform this cleanup.
 
 ### Project scope
 
-Use when the repository itself must carry the configuration, especially for cloned remote environments.
+Use project scope when the integration must travel with the repository, especially remote/cloud environments:
 
 ```bash
-python install.py --target codex --scope project --repo .
-python install.py --target claude --scope project --repo .
+python install.py --target codex --scope project --repo . --dry-run
+python install.py --target claude --scope project --repo . --dry-run
+python install.py --target both --scope project --repo . --dry-run
+
 python install.py --target both --scope project --repo .
 ```
 
-Project-scope locations:
+Locations:
 
 ```text
-Codex skills:       .agents/skills/
+Codex skills:       .codex/skills/
 Codex hooks:        .codex/hooks.json
 Claude skills:      .claude/skills/
 Claude hooks:       .claude/settings.json
 Shared runtime:     .codebase-documentation-kit/runtime/
 ```
 
-Project hook commands use `python3` and are aimed at Git/Linux-style remote environments. For local Windows, prefer user scope unless the project environment already exposes `python3` in its shell.
+For Codex, project settings include a POSIX command plus the officially supported `commandWindows` override. The Windows override locates the nearest Git root in Python so starting Codex from a subdirectory still resolves the committed runtime.
 
-## 2. Dry-run installation
+For Claude Code, project scope uses:
 
-Before changing user or project configuration:
-
-```bash
-python install.py --target both --scope user --dry-run
-python install.py --target both --scope project --repo . --dry-run
+```text
+python3 "${CLAUDE_PROJECT_DIR}/.codebase-documentation-kit/runtime/hook_claude.py"
 ```
 
-The installer merges JSON and removes/replaces only handlers whose command contains this toolkit's markers. It does not replace unrelated hook groups.
+This is optimized for POSIX/cloud environments. Claude Code supports project-root placeholders and recommends them for project scripts. For native local Windows Claude Code, prefer user scope unless the shell exposes `python3`.
 
-## 3. Convert a repository using V1
+## 2. Hook trust
 
-Do not begin by editing `AGENTS.md` manually.
+Codex project hooks load only from trusted project configuration. After installing or changing non-managed Codex hooks, review/trust the exact definitions with the Codex hook UI before relying on them.
 
-### Detect
+Hook commands execute with the user's permissions. Review committed project-scope runtime changes like any other executable code.
+
+## 3. Convert a V1 repository
+
+Start with detection, not manual edits:
 
 ```bash
 python runtime/docsctl.py status . --json
 ```
 
-Expected legacy states:
+Expected legacy states are `v1-legacy` or `v1-probable`.
 
-```text
-v1-legacy
-v1-probable
-```
-
-### Plan, no writes
+Plan with no writes:
 
 ```bash
 python migrate.py . --agents both --json
 ```
 
-Review:
+Inspect `semantic_review_required`, warnings, and planned actions. Use the real provider scope:
 
-- `semantic_review_required`
-- `warnings`
-- planned file rewrites/creates
+```text
+--agents codex
+--agents claude
+--agents both
+```
 
-### Apply only when unambiguous
+Apply only when unambiguous:
 
 ```bash
 python migrate.py . --agents both --apply --json
-```
-
-The migrator:
-
-- rewrites only recognized V1 documentation-routing lines;
-- removes the V1 root instruction that invokes `$codebase-documentation-architect` after every task;
-- removes the mandatory direct `docs/state/README.md` route;
-- preserves unrelated `AGENTS.md` instructions;
-- preserves a `CLAUDE.md` that is exactly `@AGENTS.md`;
-- creates `CLAUDE.md` as `@AGENTS.md` when `AGENTS.md` exists and Claude support is requested;
-- adds `.docsctl.json`;
-- writes a migration backup outside the repository before changing files.
-
-It refuses automatic application when root agent instructions require semantic merging, or when legacy procedure documents may contain project-specific facts.
-
-### Validate
-
-```bash
 python runtime/docsctl.py validate . --json
 ```
 
-Commit the migration separately from unrelated product changes when practical.
+The migrator preserves unrelated project instructions and refuses automatic destructive merging when root agent files or legacy procedure files may contain project-specific facts.
 
-## 4. Compatibility when V2 is installed before repository migration
+## 4. Same-session V1 -> V2 migration
 
-This ordering is supported.
+Release 2.1 supports the important rollout case where V2 is installed globally before an individual V1 repository is migrated.
 
-A V1 repository may still contain a task-end instruction that invokes `$codebase-documentation-architect`. The V2 architect skill contains a compatibility bridge. On such a call it detects the V1 repository, avoids the former broad maintenance workflow, and routes through the migration path first.
+For a recognized V1 repository:
 
-Hooks remain inert until `.docsctl.json` identifies the repository as V2, so installing the new user-level package does not immediately impose V2 completion behavior on untreated repositories.
+```text
+SessionStart
+  -> silent legacy Git/validation baseline
 
-## 5. Rollback
+repository remains V1
+  -> Stop gating is inert
 
-Every applied migration creates an external backup recording both files that existed and files that were absent before migration.
+architect migrates repository to V2 in the same session
+  -> the existing baseline is reused
 
-Restore the newest backup for the repository:
+Stop
+  -> actual task changes are attributable
+  -> migration-only changes can finish silently
+  -> source/config changes still receive one targeted maintainer continuation
+```
+
+This avoids the former missing-baseline loop without requiring per-tool hooks.
+
+## 5. Fresh bootstrap
+
+Invoke the architect skill or start from the deterministic scaffold with the provider scope you actually intend to support:
+
+```bash
+python runtime/docsctl.py scaffold . --agents codex --json
+python runtime/docsctl.py scaffold . --agents claude --json
+python runtime/docsctl.py scaffold . --agents both --json
+```
+
+`scaffold` does not overwrite existing project files and currently creates `.docsctl.json` with that same scope. If scaffold already created the marker, do not run `mark` again. If the documentation architecture was created manually and the marker is absent, finish with:
+
+```bash
+python runtime/docsctl.py mark . --agents <codex|claude|both>
+python runtime/docsctl.py validate . --json
+```
+
+A Claude-only bootstrap must remain Claude-only unless Codex support was explicitly requested, and vice versa.
+
+## 6. Normal V2 task flow
+
+```text
+SessionStart
+  -> silent baseline of HEAD, dirty state, index identity, and existing deterministic failures
+
+normal task
+  -> no per-tool documentation process
+
+Stop
+  -> compare final state to baseline
+  -> validate deterministic invariants
+  -> no changes: allow silently
+  -> tests/generated only: allow silently
+  -> ordinary edits to existing docs only: allow silently
+  -> source/config/unknown or real doc-structure change: one targeted maintainer continuation
+  -> new deterministic validation failure: compact exact feedback
+
+second Stop after semantic maintainer continuation
+  -> allow when no new deterministic failure remains
+```
+
+The maintainer may legitimately decide that no documentation write is required.
+
+## 7. Generated and test classification
+
+The deterministic impact classifier suppresses maintainer activation for common generated outputs, including:
+
+```text
+dist/
+build/
+coverage/
+.next/
+out/
+target/
+.cache/
+*.min.js
+*.min.css
+*.map
+*.lock
+package-lock.json
+pnpm-lock.yaml
+bun.lock / bun.lockb
+go.sum
+```
+
+Common language-specific test shapes are also recognized, including test/spec directories, `test_*`, `*_test`, `*_spec`, `.test.*`, `.spec.*`, and directory names ending in `.Tests` / `_tests`.
+
+If a project has generated or test conventions outside these defaults, extending the deterministic classifier is preferable to adding prose instructions to the skill.
+
+## 8. Rollback
+
+Every applied migration creates an external backup.
+
+Newest backup:
 
 ```bash
 python rollback.py . --json
 ```
 
-Restore a specific backup:
+Specific backup:
 
 ```bash
 python rollback.py . --backup /path/to/migration-YYYYMMDD-HHMMSS.zip --json
 ```
 
-Rollback restores changed files and removes files that were created by that migration but did not previously exist.
+Rollback is conflict-aware, rejects unsafe aliasing/path escapes, and avoids overwriting post-migration edits unless an explicit recovery path is used.
 
-## 6. Bootstrap a new repository
-
-Install the environment integration first, then either invoke the architect skill or use the deterministic scaffold as a starting point:
-
-```bash
-python runtime/docsctl.py scaffold . --agents both --json
-```
-
-Scaffold never overwrites existing project files. The architect should then inspect the compact scan and replace placeholder content with repository-specific facts where necessary.
-
-## 7. Normal V2 task flow
-
-No explicit documentation instruction is required in `AGENTS.md` after migration.
-
-```text
-SessionStart
-  -> silent snapshot of HEAD, dirty state, dirty-file hashes, and existing validation failures
-
-normal coding task
-  -> no documentation hook per tool call
-
-Stop
-  -> compare with baseline
-  -> validate deterministic invariants
-  -> no changes: silent allow
-  -> tests/generated only: silent allow
-  -> new deterministic failure: compact continuation with exact failures
-  -> source/config/unknown or doc-structure change: one compact maintainer continuation
-
-second Stop after maintainer decision
-  -> allow if no new deterministic failure remains
-  -> refresh baseline
-```
-
-The maintainer may conclude that no documentation write is necessary. That is a valid result.
-
-## 8. Codex hook trust
-
-After adding or changing non-managed Codex hooks, review/trust them in Codex before relying on them. The installer cannot grant that trust on your behalf.
-
-Because project hooks are code execution, commit and review the exact runtime scripts with the repository when project scope is used.
-
-## 9. Claude Code remote/cloud use
-
-A local `~/.claude/skills/` installation is for local sessions. For a cloned remote/cloud session, use project scope so `.claude/skills/` and `.claude/settings.json` travel with the repository.
-
-Recommended:
-
-```bash
-python install.py --target claude --scope project --repo .
-git add .claude .codebase-documentation-kit
-```
-
-Then review the generated diff before commit.
-
-## 10. Updating the toolkit later
+## 9. Update
 
 ### User scope
-
-Re-run the installer from the new package:
 
 ```bash
 python install.py --target both --scope user
 ```
 
-It replaces only the two toolkit skill directories, the shared runtime, and toolkit-owned hook handlers.
-
 ### Project scope
 
-Re-run the appropriate project installation and commit the generated tooling diff:
-
 ```bash
-python install.py --target claude --scope project --repo .
+python install.py --target both --scope project --repo .
 ```
 
-Repository `AGENTS.md` and `CLAUDE.md` do not name the toolkit in V2, so ordinary toolkit upgrades should not require repository-instruction migrations.
+Review and commit the generated tooling diff. V2 repositories do not name the toolkit skill in root agent instructions, so a runtime/skill update normally does not require a repository documentation migration.
 
-## 11. Uninstall
+The `toolkit_version` inside an existing `.docsctl.json` is informational about the model marker and is not required to match the installed runtime version for a 2.x update.
 
-Local:
+## 10. Uninstall
 
 ```bash
 python install.py --target codex --scope user --uninstall
 python install.py --target claude --scope user --uninstall
 python install.py --target both --scope user --uninstall
-```
 
-The shared user runtime is removed only when neither Codex nor Claude Code still has toolkit-owned hooks, so uninstalling one target does not break the other.
-
-Project:
-
-```bash
 python install.py --target codex --scope project --repo . --uninstall
 python install.py --target claude --scope project --repo . --uninstall
 ```
 
-Uninstalling the environment integration does not rewrite project documentation or remove `.docsctl.json`. That is deliberate: the repository documentation model remains valid even without automatic completion hooks.
+The shared runtime is removed only after no remaining installed target depends on it. Uninstalling the environment integration deliberately does not rewrite repository documentation or delete `.docsctl.json`.
 
-## 12. Troubleshooting
+## 11. Troubleshooting
 
-### Stop hook keeps asking for maintenance
+### Stop reports a missing/corrupt baseline
 
-Check:
+The first Stop requests one manual documentation-impact check. A Stop already continued by that feedback is allowed rather than entering a loop. A fresh baseline will be created on the next normal SessionStart.
 
-```bash
-python runtime/docsctl.py impact . --latest --json
-python runtime/docsctl.py validate . --json
-```
+### Stop reports Git unavailable
 
-A Stop continuation is intentionally limited by the hook's `stop_hook_active` handling. New deterministic validation failures remain blockers until fixed; semantic documentation review gets one targeted continuation and may finish with no write.
+Restore Git if practical or perform the task documentation review manually. The hook does not repeatedly continue an already continued Stop for this indeterminate infrastructure condition.
 
-### Existing broken docs make every task fail
+### Existing broken docs block unrelated tasks
 
-They should not. Session snapshots record pre-existing deterministic validation failures. The Stop hook blocks only failures not present in the session baseline.
+They should not. The session baseline stores deterministic failure counts. Only failures newly introduced after the baseline are blockers.
 
-### Migration says semantic review is required
+### Migration requires semantic review
 
-Do not use a force flag as a routine shortcut. Inspect only the root instruction files or the flagged legacy procedure docs. Preserve project-specific content, decide which instructions are shared versus Claude-specific, then mark/validate V2.
+Inspect only the flagged root instruction files or procedure docs. Preserve project facts, decide shared versus provider-specific instructions, then complete the migration and validate. Do not force ambiguous conversion as a routine shortcut.
 
-### Repository is not Git-backed
+### Project hook does not execute
 
-Architecture/scaffold/validation still work, but session impact detection is intentionally Git-oriented. For reliable automatic maintenance gating, use the toolkit in a Git repository.
+For Codex, inspect the trusted `.codex/hooks.json` definition and verify Python is available as `python3` on POSIX or `python` on Windows. For Claude Code project scope, verify `python3` exists in the project shell and `${CLAUDE_PROJECT_DIR}` is available. User scope avoids these portable-command constraints by using the installer interpreter directly.

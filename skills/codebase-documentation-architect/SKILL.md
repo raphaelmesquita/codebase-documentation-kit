@@ -57,4 +57,4 @@ Use the template asset matching the file you are creating. Do not load every tem
 
 ## Finish
 
-Run `scripts/docsctl.py validate . --json`. Resolve deterministic failures. Explain intentional warnings. For a new treated repository, create `.docsctl.json` with `scripts/docsctl.py mark . --agents both` after the documentation model is ready.
+Run `scripts/docsctl.py validate . --json`. Resolve deterministic failures. Explain intentional warnings. Ensure `.docsctl.json` uses the same derived provider scope selected for scaffold/alignment. If scaffold already created it, do not mark it again. If the marker is absent, create it with `scripts/docsctl.py mark . --agents <provider-scope>`. Never default a Claude-only or Codex-only repository to `both`.

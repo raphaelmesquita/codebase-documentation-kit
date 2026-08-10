@@ -25,7 +25,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Iterable
 from urllib.parse import unquote
 
-VERSION = "2.0.0"
+VERSION = "2.1.1"
 MODEL_FILE = ".docsctl.json"
 MODEL_SCHEMA = 2
 TOOLKIT_NAME = "codebase-documentation-kit"
@@ -61,7 +61,8 @@ CONFIG_NAMES = {
 }
 TEST_PARTS = {"test", "tests", "spec", "specs", "__tests__"}
 DOC_EXTENSIONS = {".md", ".mdx", ".rst", ".adoc"}
-GENERATED_DIRS = {"dist", "build"}
+GENERATED_DIRS = {"dist", "build", "coverage", ".next", "out", "target", ".cache"}
+GENERATED_FILES = {"package-lock.json", "pnpm-lock.yaml", "bun.lock", "bun.lockb", "go.sum"}
 DATE_TIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$")
 
 V1_CANONICAL_LINES = {
@@ -353,11 +354,13 @@ def classify_path(rel: str) -> str:
     suffix = p.suffix.lower()
     if lower == MODEL_FILE.lower():
         return "model"
-    if parts & GENERATED_DIRS or name.endswith((".min.js", ".min.css")) or suffix in {".lock", ".map"}:
+    if parts & GENERATED_DIRS or name in GENERATED_FILES or name.endswith((".min.js", ".min.css")) or suffix in {".lock", ".map"}:
         return "generated"
     if lower.startswith("docs/") or name in {x.lower() for x in DOC_ROOT_FILES} or suffix in DOC_EXTENSIONS:
         return "docs"
-    if parts & TEST_PARTS or name.startswith("test_") or name.endswith("_test.py") or ".test." in name or ".spec." in name:
+    test_path_part = any(part in TEST_PARTS or part.endswith((".test", ".tests", "_test", "_tests")) for part in parts)
+    stem = p.stem.lower()
+    if test_path_part or stem.startswith("test_") or stem.endswith(("_test", "_spec")) or ".test." in name or ".spec." in name:
         return "tests"
     if lower.startswith(".github/workflows/") or "migration" in parts or "migrations" in parts:
         return "config"
@@ -414,10 +417,18 @@ def impact_report(root: Path, snap: dict) -> dict:
 
     substantive = any(item["category"] in {"source", "config"} for item in changed)
     unknown_change = any(item["category"] == "other" for item in changed)
-    docs_structure = any(
-        item["category"] == "docs" and (item.get("before") is None or item.get("after") is None or "D" in str(item.get("after", "")))
-        for item in changed
-    )
+    def is_doc_structure_change(item: dict) -> bool:
+        if item["category"] != "docs":
+            return False
+        status = str(item.get("after") or "")
+        if item.get("reason") == "committed-during-session":
+            return status[:1] in {"A", "D", "R", "C"}
+        # Porcelain status is absent at the baseline for a clean tracked file, so
+        # before=None must not be mistaken for "file did not exist". Structural
+        # changes are additions, deletions, renames/copies, or untracked docs.
+        return "??" in status or any(flag in status for flag in ("A", "D", "R", "C"))
+
+    docs_structure = any(is_doc_structure_change(item) for item in changed)
     needs_review = substantive or unknown_change or docs_structure
     only_tests_or_generated = bool(changed) and all(item["category"] in {"tests", "generated"} for item in changed)
     if only_tests_or_generated:

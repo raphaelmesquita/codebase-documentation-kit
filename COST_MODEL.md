@@ -1,10 +1,10 @@
 # Context and Operation Cost Model
 
-This file documents the design target, not billing guarantees. Token counts vary by tokenizer, host-added context, repository content, and model behavior.
+This file documents design measurements, not billing guarantees. Token counts vary by tokenizer, host-added context, repository content, and model behavior.
 
 ## Measured instruction footprint
 
-The supplied V1 package had these context-facing files on the normal completion path:
+The measured V1 package forced this normal completion path:
 
 ```text
 SKILL.md                         3,987 bytes
@@ -14,78 +14,75 @@ maintenance-procedures.md        9,959 bytes
 forced completion path          25,631 bytes
 ```
 
-V2 routine completion uses:
+Release 2.1 routine completion uses:
 
 ```text
-codebase-documentation-maintainer/SKILL.md   ~1.8 KB
-Stop hook feedback when needed                compact, path-focused
+codebase-documentation-maintainer/SKILL.md   1,794 bytes / 249 words
 successful hook feedback                      0 model-visible context
+Stop feedback when needed                     compact, path-focused
 ```
 
-By raw instruction bytes, the routine skill body is about 93% smaller than the V1 forced completion instruction path before counting repository reads.
+By raw instruction bytes, the routine skill body remains about 93% smaller than the V1 forced completion path before repository reads are counted.
 
-For architecture work, a common V1 core path was approximately:
+For architecture work, the measured V1 core path was approximately 29.9 KB. Release 2.1 uses:
 
 ```text
-SKILL.md + bootstrap checklist + taxonomy + page templates
-~29.9 KB
+architect SKILL.md             4,409 bytes
+architecture reference         4,750 bytes
+-----------------------------------------
+common architecture path       9,159 bytes
 ```
 
-The V2 architect plus its optional structural reference is approximately:
+That remains about 69% smaller by raw bytes than the measured V1 architecture path.
 
-```text
-architect SKILL.md + architecture reference
-~8.7 KB
-```
+## Operational savings
 
-That is about 71% smaller by raw bytes before repository evidence is read.
-
-## More important than file size
-
-V2 changes operations as well as prompt size:
+The larger saving is operational:
 
 - no repository-wide completion rescan;
 - no mandatory maintenance reference read;
-- no per-tool hook process;
+- no `PostToolUse` process on every edit;
 - no mandatory `docs/state/README.md` read or creation;
-- no task-by-task memory write;
-- no runtime consistency check of the toolkit's own examples/templates;
-- no provider-specific duplicate shared runtime in project installs;
-- deterministic validation and Git impact classification consume CPU, not model context;
-- existing validation debt is baselined instead of re-injected on every task.
+- no default task-by-task `MEMORY.md` write;
+- deterministic Git impact/validation consume CPU, not model context;
+- pre-existing deterministic debt is baselined rather than re-injected;
+- routine edits to existing docs no longer look like doc-structure changes;
+- common generated outputs and language-specific tests are filtered before semantic maintenance.
 
-## Expected frequency model
+Release 2.1 specifically reduces false maintainer activations for `.next/`, `coverage/`, `out/`, `target/`, `.cache/`, `package-lock.json`, `pnpm-lock.yaml`, `go.sum`, `*_test.go`, `*_spec.rb`, and equivalent recognized test paths.
 
-### Every V2 session
+## Frequency model
 
-- one silent `SessionStart` snapshot;
-- one `Stop` diff/validation check;
+### V2 session
+
+- one silent `SessionStart` snapshot for active V2 repositories;
+- recognized V1 repositories may also get one silent baseline solely to support same-session migration;
+- one `Stop` impact/validation check;
 - no model context when no follow-through is needed.
 
-### Test-only/generated-only task
+### Test/generated/docs-only task
 
-- no maintainer invocation;
-- no repository documentation write.
+- no maintainer invocation when classification is deterministic and no new validation failure exists.
 
 ### Source/config task
 
-- at most one compact semantic documentation-review continuation under the normal Stop flow;
-- maintainer inspects task diff and plausible docs only;
+- at most one compact semantic documentation-review continuation under the normal flow;
+- maintainer reads changed paths and plausible docs only;
 - no write is a valid outcome.
 
 ### Architecture/migration task
 
-- architect skill is intentionally more expensive but should be rare;
-- deterministic scan limits initial repository exploration;
-- optional reference/template loading is demand-driven.
+- architect is intentionally more expensive but rare;
+- deterministic scan limits initial exploration;
+- optional reference/template loading remains demand-driven.
 
-## Budgets
+## Repository context budgets
 
-Default repository budgets enforced as warnings by `.docsctl.json`:
+Default warning budgets stored in `.docsctl.json`:
 
 ```text
 MEMORY.md       12,000 bytes
 docs/README.md 20,000 bytes
 ```
 
-They are context hygiene defaults, not correctness limits, and can be changed per repository in `.docsctl.json`.
+These are context-hygiene defaults, not correctness limits, and can be changed per repository.

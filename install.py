@@ -34,6 +34,7 @@ class Integration:
     skills_root: Path
     command: str
     owned_script: Path | None
+    command_windows: str | None = None
 
 
 @dataclass
@@ -192,14 +193,29 @@ def command_for(provider: str, scope: str, runtime: Path) -> str:
     return 'python3 "${CLAUDE_PROJECT_DIR}/.codebase-documentation-kit/runtime/hook_claude.py"'
 
 
+def command_windows_for(provider: str, scope: str) -> str | None:
+    if scope != "project" or provider != "codex":
+        return None
+    # Codex supports a Windows-specific override. Avoid shell-specific git command
+    # substitution by locating the nearest Git root in Python, then executing the
+    # committed project hook with the same interpreter.
+    code = (
+        "from pathlib import Path; import runpy; "
+        "p=Path.cwd(); "
+        "r=next((x for x in (p,*p.parents) if (x/'.git').exists()),p); "
+        "runpy.run_path(str(r/'.codebase-documentation-kit/runtime/hook_codex.py'),run_name='__main__')"
+    )
+    return f'python -c "{code}"'
+
+
 def integrations_for(scope: str, repo: Path | None) -> tuple[dict[str, Integration], Path, Path]:
     if scope == "user":
         home = Path.home()
         runtime = user_runtime()
         return (
             {
-                "codex": Integration("codex", home / ".codex" / "hooks.json", home / ".agents" / "skills", command_for("codex", scope, runtime), runtime / "hook_codex.py"),
-                "claude": Integration("claude", home / ".claude" / "settings.json", home / ".claude" / "skills", command_for("claude", scope, runtime), runtime / "hook_claude.py"),
+                "codex": Integration("codex", home / ".codex" / "hooks.json", home / ".codex" / "skills", command_for("codex", scope, runtime), runtime / "hook_codex.py", command_windows_for("codex", scope)),
+                "claude": Integration("claude", home / ".claude" / "settings.json", home / ".claude" / "skills", command_for("claude", scope, runtime), runtime / "hook_claude.py", command_windows_for("claude", scope)),
             },
             runtime,
             home,
@@ -208,8 +224,8 @@ def integrations_for(scope: str, repo: Path | None) -> tuple[dict[str, Integrati
     runtime = project_runtime(repo)
     return (
         {
-            "codex": Integration("codex", repo / ".codex" / "hooks.json", repo / ".agents" / "skills", command_for("codex", scope, runtime), None),
-            "claude": Integration("claude", repo / ".claude" / "settings.json", repo / ".claude" / "skills", command_for("claude", scope, runtime), None),
+            "codex": Integration("codex", repo / ".codex" / "hooks.json", repo / ".codex" / "skills", command_for("codex", scope, runtime), None, command_windows_for("codex", scope)),
+            "claude": Integration("claude", repo / ".claude" / "settings.json", repo / ".claude" / "skills", command_for("claude", scope, runtime), None, command_windows_for("claude", scope)),
         },
         runtime,
         repo,
@@ -223,6 +239,8 @@ def prepare_config(original: dict[str, Any], integration: Integration, uninstall
         remove_our_hook_groups(hooks, event, integration.command, integration.owned_script)
     if not uninstall:
         handler = {"type": "command", "command": integration.command}
+        if integration.command_windows:
+            handler["commandWindows"] = integration.command_windows
         start = dict(handler)
         start["timeout"] = 5
         stop = dict(handler)
@@ -447,6 +465,160 @@ def remove_path(path: Path) -> None:
         fail(f"Cannot safely replace {path}: unsupported destination type")
 
 
+def _read_regular_text(path: Path, label: str) -> str:
+    if path_is_unsafe_link(path) or not path.is_file():
+        fail(f"Cannot safely inspect {label} at {path}: expected a regular file")
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        fail(f"Cannot safely inspect {label} at {path}: {exc}")
+
+
+def _is_known_v1_architect_tree(path: Path) -> bool:
+    """Recognize the exact legacy skill family shipped before the V2 kit.
+
+    V1 predates ownership manifests, so migration uses multiple stable markers
+    instead of claiming any directory that merely has the same basename.
+    """
+    skill_file = path / "SKILL.md"
+    checklist = path / "references" / "bootstrap-checklist.md"
+    validator = path / "scripts" / "validate_docs_model.py"
+    if not all(path_exists(item) for item in (skill_file, checklist, validator)):
+        return False
+    try:
+        skill_text = _read_regular_text(skill_file, "legacy SKILL.md")
+        checklist_text = _read_regular_text(checklist, "legacy bootstrap checklist")
+        validator_text = _read_regular_text(validator, "legacy validator")
+    except InstallError:
+        raise
+    return all(
+        marker in skill_text
+        for marker in (
+            "name: codebase-documentation-architect",
+            "# Codebase Documentation Architect",
+            "references/bootstrap-checklist.md",
+            "completion maintenance",
+        )
+    ) and all(
+        marker in checklist_text
+        for marker in (
+            "# Bootstrap Checklist",
+            "completion maintenance",
+        )
+    ) and "Validate the documentation model produced by codebase-documentation-architect" in validator_text
+
+
+def _skill_declares_name(path: Path, expected_name: str) -> bool:
+    """Return whether a legacy SKILL.md identifies itself as the reserved product skill.
+
+    The pre-kit V1 skill and some manually copied kit installations predate the
+    ownership manifest. For the two exact product skill basenames, the SKILL.md
+    frontmatter name is the migration identity. This deliberately allows local
+    edits to an old installation without leaving a duplicate active copy in
+    `.agents/skills`.
+    """
+    skill_file = path / "SKILL.md"
+    if not path_exists(skill_file):
+        return False
+    text = _read_regular_text(skill_file, "legacy SKILL.md")
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return False
+    for line in lines[1:]:
+        stripped = line.strip()
+        if stripped == "---":
+            break
+        if stripped.startswith("name:"):
+            value = stripped.split(":", 1)[1].strip().strip('\"\'')
+            return value == expected_name
+    return False
+
+
+def _legacy_codex_skill_is_removable(path: Path, skill: str) -> bool:
+    """Return True for a legacy copy of one of this product's reserved skills.
+
+    A successful Codex install must never leave the V1 architect or an older
+    kit architect/maintainer active in `.agents/skills`. Manifest-owned trees
+    are verified before removal. Pre-manifest/manual copies are removable when
+    their SKILL.md frontmatter declares the exact reserved skill name. A path
+    collision that does not identify itself as that skill still blocks preflight.
+    """
+    if path_is_unsafe_link(path) or not path.is_dir():
+        fail(f"Legacy Codex skill collision at {path}: expected a real directory")
+
+    owner_path = path / OWNER_FILE
+    if path_exists(owner_path):
+        try:
+            assert_owned_tree(path, "skill", skill)
+        except InstallError as exc:
+            fail(
+                f"Legacy Codex skill at {path} appears toolkit-owned but cannot be removed safely: {exc}"
+            )
+        return True
+
+    if _skill_declares_name(path, skill):
+        return True
+
+    # Preserve recognition of the exact V1 package even if an unusual legacy
+    # copy lost normal frontmatter formatting.
+    if skill == "codebase-documentation-architect" and _is_known_v1_architect_tree(path):
+        return True
+
+    fail(
+        f"Legacy Codex skill collision at {path}: this reserved product path does not "
+        f"contain a SKILL.md declaring name: {skill}. Move or remove it explicitly, "
+        "then rerun the installer."
+    )
+
+
+def legacy_codex_skill_removals(scope: str, repo: Path | None, scope_root: Path) -> list[Path]:
+    """Plan mandatory migration of this toolkit from `.agents` to `.codex`.
+
+    When Codex is selected, a successful install/uninstall removes recognized
+    legacy toolkit skills from `.agents/skills`. Unrelated `.agents` content is
+    preserved. Ambiguous same-name collisions fail preflight so duplicate
+    toolkit skills are never left active silently.
+    """
+    base = Path.home() if scope == "user" else repo
+    assert base is not None
+    agents_root = base / ".agents"
+    skills_root = agents_root / "skills"
+    if not path_exists(skills_root):
+        return []
+    if path_is_unsafe_link(skills_root) or not skills_root.is_dir():
+        fail(f"Cannot safely migrate legacy Codex skills: {skills_root} is not a real directory")
+
+    removable: list[Path] = []
+    for skill in SKILLS:
+        candidate = skills_root / skill
+        if not path_exists(candidate):
+            continue
+        if _legacy_codex_skill_is_removable(candidate, skill):
+            removable.append(candidate)
+
+    if not removable:
+        return []
+
+    try:
+        skill_children = list(skills_root.iterdir())
+        agent_children = list(agents_root.iterdir())
+    except OSError as exc:
+        fail(f"Cannot inspect legacy Codex skill root {agents_root}: {exc}")
+
+    removable_names = {path.name for path in removable}
+    # Prune `.agents` only when it contains nothing except the toolkit skills
+    # being removed. Otherwise remove only those skill directories.
+    if (
+        len(agent_children) == 1
+        and agent_children[0] == skills_root
+        and all(child.name in removable_names for child in skill_children)
+        and len(skill_children) == len(removable)
+    ):
+        assert_safe_destination(agents_root, scope_root)
+        return [agents_root]
+    return removable
+
+
 class Transaction:
     """Stage all output away from destinations and restore every prior path on error."""
 
@@ -468,6 +640,11 @@ class Transaction:
     def stage_json(self, destination: Path, obj: dict[str, Any], description: str) -> None:
         staged = self.workspace / f"config-{len(self.changes)}.json"
         staged.write_text(json.dumps(obj, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        self.changes.append(Change(destination, staged, description))
+
+    def stage_text(self, destination: Path, text: str, description: str) -> None:
+        staged = self.workspace / f"config-{len(self.changes)}.txt"
+        staged.write_text(text, encoding="utf-8")
         self.changes.append(Change(destination, staged, description))
 
     def stage_removal(self, destination: Path, description: str) -> None:
@@ -565,7 +742,6 @@ def plan(
     selected = [integrations[target] for target in targets]
     originals: dict[str, dict[str, Any]] = {}
     desired: dict[str, dict[str, Any]] = {}
-
     # Always inspect both configs for an uninstall. An unreadable unselected
     # config must not make us delete a runtime that it may still reference.
     inspected = integrations.values() if uninstall else selected
@@ -616,7 +792,16 @@ def plan(
             else:
                 skill_changes.append((source, destination, manifest, False))
 
+    legacy_skill_removals: list[Path] = []
+    if "codex" in targets:
+        legacy_skill_removals = legacy_codex_skill_removals(scope, repo, scope_root)
+        for legacy in legacy_skill_removals:
+            preflight_parent(legacy.parent, scope_root)
+            assert_safe_destination(legacy, scope_root)
+
     actions: list[str] = []
+    for legacy in legacy_skill_removals:
+        actions.append(f"remove legacy toolkit path {legacy}")
     if not uninstall and runtime_will_change:
         actions.append(f"install shared runtime {runtime}")
     if uninstall and runtime_will_change:
@@ -633,6 +818,8 @@ def plan(
 
     transaction = Transaction(scope_root)
     try:
+        for legacy in legacy_skill_removals:
+            transaction.stage_removal(legacy, f"remove legacy toolkit path {legacy}")
         if not uninstall and runtime_will_change:
             transaction.stage_tree(runtime_source, runtime, runtime_manifest, action_for_install(runtime))
         elif uninstall and runtime_will_change:

@@ -126,7 +126,7 @@ class InstallerRegressionTests(unittest.TestCase):
             self.assertNotIn(str(python_a), commands[0])
         self.assertTrue((home / ".codebase-documentation-kit" / "runtime" / OWNER_FILE).is_file())
         for skill in ("codebase-documentation-architect", "codebase-documentation-maintainer"):
-            self.assertTrue((home / ".agents" / "skills" / skill / OWNER_FILE).is_file())
+            self.assertTrue((home / ".codex" / "skills" / skill / OWNER_FILE).is_file())
 
         # Recreate an A-owned hook state, then prove a B uninstall recognizes it.
         with mock.patch.dict(os.environ, environment), mock.patch.object(installer.sys, "executable", str(python_a)):
@@ -137,12 +137,12 @@ class InstallerRegressionTests(unittest.TestCase):
         self.assertNotIn("hook_codex.py", json.dumps(final_config))
         self.assertFalse((home / ".codebase-documentation-kit").exists())
         for skill in ("codebase-documentation-architect", "codebase-documentation-maintainer"):
-            self.assertFalse((home / ".agents" / "skills" / skill).exists())
+            self.assertFalse((home / ".codex" / "skills" / skill).exists())
 
     def test_p03_foreign_or_modified_skill_tree_is_never_replaced_or_removed(self) -> None:
         repo = self.root / "foreign skill repo"
         repo.mkdir()
-        foreign = repo / ".agents" / "skills" / "codebase-documentation-architect"
+        foreign = repo / ".codex" / "skills" / "codebase-documentation-architect"
         foreign.mkdir(parents=True)
         foreign_file = foreign / "foreign-user-file.txt"
         foreign_file.write_text("keep", encoding="utf-8")
@@ -158,7 +158,7 @@ class InstallerRegressionTests(unittest.TestCase):
         clean.mkdir()
         result = self.run_installer("--target", "codex", "--scope", "project", "--repo", str(clean))
         self.assertEqual(result.returncode, 0, result.stderr)
-        installed = clean / ".agents" / "skills" / "codebase-documentation-architect"
+        installed = clean / ".codex" / "skills" / "codebase-documentation-architect"
         self.assertTrue((installed / OWNER_FILE).is_file())
         skill_file = installed / "SKILL.md"
         skill_file.write_text(skill_file.read_text(encoding="utf-8") + "\nlocal change\n", encoding="utf-8")
@@ -192,6 +192,165 @@ class InstallerRegressionTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse((repo / ".codebase-documentation-kit").exists())
                 self.assertFalse((repo / ".codex" / "hooks.json").exists())
+
+    def test_codex_skills_install_only_under_dotcodex_without_touching_config_toml(self) -> None:
+        home = self.root / "codex home"
+        config = home / ".codex" / "config.toml"
+        config.parent.mkdir(parents=True)
+        original = 'model = "gpt-5.6"\n\n[features]\nunified_exec = true\n'
+        config.write_text(original, encoding="utf-8")
+
+        result = self.run_installer("--target", "codex", "--scope", "user", home=home)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((home / ".agents").exists())
+        self.assertEqual(config.read_text(encoding="utf-8"), original)
+        for skill in ("codebase-documentation-architect", "codebase-documentation-maintainer"):
+            self.assertTrue((home / ".codex" / "skills" / skill / "SKILL.md").is_file())
+
+        result = self.run_installer("--target", "codex", "--scope", "user", home=home)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(config.read_text(encoding="utf-8"), original)
+
+        result = self.run_installer("--target", "codex", "--scope", "user", "--uninstall", home=home)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(config.read_text(encoding="utf-8"), original)
+        self.assertFalse((home / ".codex" / "skills" / "codebase-documentation-architect").exists())
+        self.assertFalse((home / ".agents").exists())
+
+    def test_project_codex_uses_dotcodex_skills_and_no_agents_directory(self) -> None:
+        repo = self.root / "project codex layout"
+        repo.mkdir()
+        result = self.run_installer("--target", "codex", "--scope", "project", "--repo", str(repo))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((repo / ".agents").exists())
+        self.assertFalse((repo / ".codex" / "config.toml").exists())
+        for skill in ("codebase-documentation-architect", "codebase-documentation-maintainer"):
+            self.assertTrue((repo / ".codex" / "skills" / skill / "SKILL.md").is_file())
+
+    def test_codex_install_removes_known_v1_skill_from_agents_and_preserves_foreign_content(self) -> None:
+        home = self.root / "legacy v1 home"
+        legacy = home / ".agents" / "skills" / "codebase-documentation-architect"
+        (legacy / "references").mkdir(parents=True)
+        (legacy / "scripts").mkdir(parents=True)
+        (legacy / "SKILL.md").write_text(
+            "---\nname: codebase-documentation-architect\n---\n# Codebase Documentation Architect\n"
+            "Read references/bootstrap-checklist.md before completion maintenance.\n",
+            encoding="utf-8",
+        )
+        (legacy / "references" / "bootstrap-checklist.md").write_text(
+            "# Bootstrap Checklist\nUse completion maintenance when appropriate.\n", encoding="utf-8"
+        )
+        (legacy / "scripts" / "validate_docs_model.py").write_text(
+            "\"\"\"Validate the documentation model produced by codebase-documentation-architect.\"\"\"\n", encoding="utf-8"
+        )
+        foreign = home / ".agents" / "skills" / "other-skill" / "SKILL.md"
+        foreign.parent.mkdir(parents=True)
+        foreign.write_text("# Foreign\n", encoding="utf-8")
+
+        result = self.run_installer("--target", "codex", "--scope", "user", home=home)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(legacy.exists())
+        self.assertEqual(foreign.read_text(encoding="utf-8"), "# Foreign\n")
+        self.assertTrue((home / ".codex" / "skills" / "codebase-documentation-architect" / "SKILL.md").is_file())
+
+    def test_codex_install_removes_locally_modified_v1_architect_by_reserved_skill_identity(self) -> None:
+        home = self.root / "modified legacy architect home"
+        legacy = home / ".agents" / "skills" / "codebase-documentation-architect"
+        legacy.mkdir(parents=True)
+        (legacy / "SKILL.md").write_text(
+            "---\nname: codebase-documentation-architect\ndescription: locally customized old skill\n---\n"
+            "# My modified legacy architect\nThis copy no longer matches the original package fingerprints.\n",
+            encoding="utf-8",
+        )
+        (legacy / "local-notes.md").write_text("old local customization\n", encoding="utf-8")
+
+        result = self.run_installer("--target", "codex", "--scope", "user", home=home)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((home / ".agents").exists())
+        self.assertTrue((home / ".codex" / "skills" / "codebase-documentation-architect" / "SKILL.md").is_file())
+
+    def test_codex_install_removes_pre_manifest_maintainer_copy_from_agents(self) -> None:
+        home = self.root / "manual old maintainer home"
+        legacy = home / ".agents" / "skills" / "codebase-documentation-maintainer"
+        legacy.mkdir(parents=True)
+        (legacy / "SKILL.md").write_text(
+            "---\nname: codebase-documentation-maintainer\ndescription: manually copied older kit skill\n---\n"
+            "# Old maintainer\n",
+            encoding="utf-8",
+        )
+
+        result = self.run_installer("--target", "codex", "--scope", "user", home=home)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((home / ".agents").exists())
+        self.assertTrue((home / ".codex" / "skills" / "codebase-documentation-maintainer" / "SKILL.md").is_file())
+
+    def test_project_codex_dry_run_plans_legacy_agents_removal_then_apply_prunes_it(self) -> None:
+        repo = self.root / "legacy project repo"
+        legacy = repo / ".agents" / "skills" / "codebase-documentation-architect"
+        (legacy / "references").mkdir(parents=True)
+        (legacy / "scripts").mkdir(parents=True)
+        (legacy / "SKILL.md").write_text(
+            "---\nname: codebase-documentation-architect\n---\n# Codebase Documentation Architect\n"
+            "Read references/bootstrap-checklist.md before completion maintenance.\n", encoding="utf-8"
+        )
+        (legacy / "references" / "bootstrap-checklist.md").write_text(
+            "# Bootstrap Checklist\nChoose completion maintenance for routine completion.\n", encoding="utf-8"
+        )
+        (legacy / "scripts" / "validate_docs_model.py").write_text(
+            '"""Validate the documentation model produced by codebase-documentation-architect."""\n', encoding="utf-8"
+        )
+
+        dry = self.run_installer("--target", "codex", "--scope", "project", "--repo", str(repo), "--dry-run")
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        self.assertIn("remove legacy toolkit path", dry.stdout)
+        self.assertTrue(legacy.exists())
+        self.assertFalse((repo / ".codex" / "skills" / "codebase-documentation-architect").exists())
+
+        result = self.run_installer("--target", "codex", "--scope", "project", "--repo", str(repo))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((repo / ".agents").exists())
+        self.assertTrue((repo / ".codex" / "skills" / "codebase-documentation-architect" / "SKILL.md").is_file())
+
+    def test_claude_only_install_does_not_touch_agents(self) -> None:
+        home = self.root / "claude only home"
+        foreign = home / ".agents" / "skills" / "codebase-documentation-architect" / "SKILL.md"
+        foreign.parent.mkdir(parents=True)
+        foreign.write_text("# Leave for Codex migration later\n", encoding="utf-8")
+
+        result = self.run_installer("--target", "claude", "--scope", "user", home=home)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(foreign.read_text(encoding="utf-8"), "# Leave for Codex migration later\n")
+        self.assertTrue((home / ".claude" / "skills" / "codebase-documentation-architect" / "SKILL.md").is_file())
+
+    def test_codex_install_removes_owned_v210_skills_from_agents(self) -> None:
+        home = self.root / "owned old layout home"
+        installer = load_installer()
+        for skill in installer.SKILLS:
+            source = ROOT / "skills" / skill
+            legacy = home / ".agents" / "skills" / skill
+            legacy.parent.mkdir(parents=True, exist_ok=True)
+            import shutil
+            shutil.copytree(source, legacy)
+            manifest = installer.make_manifest("skill", skill, source)
+            (legacy / OWNER_FILE).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+        result = self.run_installer("--target", "codex", "--scope", "user", home=home)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((home / ".agents").exists())
+        for skill in installer.SKILLS:
+            self.assertTrue((home / ".codex" / "skills" / skill / OWNER_FILE).is_file())
+
+    def test_codex_install_blocks_ambiguous_same_name_agents_skill_instead_of_leaving_duplicate(self) -> None:
+        home = self.root / "ambiguous old layout home"
+        collision = home / ".agents" / "skills" / "codebase-documentation-architect"
+        collision.mkdir(parents=True)
+        (collision / "SKILL.md").write_text("# User customized unrelated content\n", encoding="utf-8")
+
+        result = self.run_installer("--target", "codex", "--scope", "user", home=home)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Legacy Codex skill collision", result.stderr)
+        self.assertTrue(collision.exists())
+        self.assertFalse((home / ".codex" / "skills" / "codebase-documentation-architect").exists())
 
     @unittest.skipUnless(os.name == "nt", "Windows junction regression")
     def test_p1_project_codex_junction_cannot_escape_scope(self) -> None:
@@ -298,6 +457,65 @@ class InstallerRegressionTests(unittest.TestCase):
         result = self.run_installer("--target", "claude", "--scope", "project", "--repo", str(repo), "--uninstall")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((repo / ".codebase-documentation-kit").exists())
+
+    def test_project_codex_installs_windows_override(self) -> None:
+        repo = self.root / "codex windows override"
+        repo.mkdir()
+        result = self.run_installer("--target", "codex", "--scope", "project", "--repo", str(repo))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = json.loads((repo / ".codex" / "hooks.json").read_text(encoding="utf-8"))
+        handlers = [
+            handler
+            for event in ("SessionStart", "Stop")
+            for group in config["hooks"][event]
+            for handler in group["hooks"]
+            if ".codebase-documentation-kit/runtime/hook_codex.py" in handler.get("command", "")
+        ]
+        self.assertEqual(len(handlers), 2, handlers)
+        for handler in handlers:
+            self.assertIn("commandWindows", handler)
+            self.assertIn("hook_codex.py", handler["commandWindows"])
+            self.assertIn("Path.cwd()", handler["commandWindows"])
+
+    @unittest.skipIf(os.name == "nt", "POSIX project command execution is covered on non-Windows hosts")
+    def test_project_hook_commands_execute_from_repository_subdirectory(self) -> None:
+        repo = self.root / "project command smoke"
+        repo.mkdir()
+        subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test User"], check=True)
+        scaffold = subprocess.run(
+            [sys.executable, str(ROOT / "runtime" / "docsctl.py"), "scaffold", str(repo), "--agents", "both", "--json"],
+            text=True, capture_output=True,
+        )
+        self.assertEqual(scaffold.returncode, 0, scaffold.stderr)
+        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-qm", "initial"], check=True)
+        result = self.run_installer("--target", "both", "--scope", "project", "--repo", str(repo))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        subdir = repo / "src" / "nested"
+        subdir.mkdir(parents=True)
+        env = os.environ.copy()
+        env["XDG_CACHE_HOME"] = str(self.root / "hook-cache")
+        env["CLAUDE_PROJECT_DIR"] = str(repo)
+
+        for provider, config_path in (
+            ("codex", repo / ".codex" / "hooks.json"),
+            ("claude", repo / ".claude" / "settings.json"),
+        ):
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            handler = config["hooks"]["SessionStart"][0]["hooks"][0]
+            payload = json.dumps({
+                "hook_event_name": "SessionStart",
+                "source": "startup",
+                "session_id": f"smoke-{provider}",
+                "cwd": str(subdir),
+            })
+            cp = subprocess.run(
+                handler["command"],
+                input=payload, text=True, capture_output=True, shell=True, cwd=subdir, env=env,
+            )
+            self.assertEqual(cp.returncode, 0, f"{provider}: {cp.stderr}\ncommand={handler['command']}")
 
 
 if __name__ == "__main__":

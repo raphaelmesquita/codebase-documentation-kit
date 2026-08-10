@@ -28,9 +28,16 @@ def repo_from_input(data: dict) -> Path | None:
 def begin(data: dict) -> None:
     root = repo_from_input(data)
     session_id = str(data.get("session_id") or "unknown")
-    if root is None or docsctl.detect_status(root)["state"] != "v2" or not docsctl.git_available(root):
+    if root is None or not docsctl.git_available(root):
         return
-    docsctl.snapshot(root, session_id)
+    state = docsctl.detect_status(root)["state"]
+    if state == "v2":
+        docsctl.snapshot(root, session_id)
+    elif state in {"v1-legacy", "v1-probable"}:
+        # Capture a silent legacy baseline so a repository migrated to V2 during
+        # this same session can still attribute task changes correctly. Stop
+        # remains inert while the repository is still V1.
+        docsctl.snapshot(root, session_id)
 
 
 def evaluate_stop(data: dict) -> dict:
@@ -40,21 +47,30 @@ def evaluate_stop(data: dict) -> dict:
         return {"action": "allow"}
     state = docsctl.detect_status(root)["state"]
     snap, _ = docsctl.load_snapshot(root, session_id, latest=False)
-    if state != "v2" and snap is None:
+    stop_hook_active = bool(data.get("stop_hook_active"))
+
+    # Hooks may capture a legacy baseline solely to support an in-session V1 ->
+    # V2 migration, but completion gating stays fully inert until V2 is active.
+    if state != "v2":
         return {"action": "allow"}
+
     if not docsctl.git_available(root):
+        if stop_hook_active:
+            return {"action": "allow"}
         return {
             "action": "continue",
             "kind": "git-unavailable",
-            "message": "Documentation impact could not be determined because Git is unavailable. Restore Git access before finishing.",
+            "message": "Documentation impact could not be determined because Git is unavailable. Restore Git access or review the task documentation manually before finishing.",
             "report": docsctl.impact_report(root, {"git_available": False}),
         }
 
     if snap is None:
+        if stop_hook_active:
+            return {"action": "allow"}
         return {
             "action": "continue",
             "kind": "impact-indeterminate",
-            "message": "Session impact is indeterminate because its baseline snapshot is missing or corrupt. Start a new session before finishing.",
+            "message": "Session impact cannot be reconstructed because its baseline snapshot is missing or corrupt. Review the current task documentation manually; automatic gating resumes on the next session baseline.",
         }
 
     report = docsctl.impact_report(root, snap)
@@ -66,7 +82,6 @@ def evaluate_stop(data: dict) -> dict:
             "report": report,
         }
     validation = docsctl.validate(root)
-    stop_hook_active = bool(data.get("stop_hook_active"))
 
     stored_counts = snap.get("validation_failure_counts")
     if isinstance(stored_counts, dict):
