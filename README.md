@@ -11,12 +11,19 @@ The original V1 skill coupled routine completion maintenance to a large architec
 1. `SessionStart` captures a silent Git-aware baseline.
 2. Work proceeds normally with no per-tool documentation hooks.
 3. `Stop` compares the repository with the baseline.
-4. Test-only, generated-only, and ordinary documentation-only edits can finish silently.
+4. Test-only, generated-only, and ordinary documentation-only edits can finish silently (unless `docs_are_product` is set; see Optional repository settings).
 5. Source/config/structural changes receive at most one compact semantic review continuation in the normal flow.
 6. New deterministic documentation-model failures are reported directly.
 7. Successful hooks add no model-visible context.
 
 Recognized V1 repositories may receive a silent baseline before migration so that a V1 -> V2 conversion performed during the same session does not lose attribution of task changes. Completion gating remains inert while the repository is still V1.
+
+## Optional repository settings
+
+Both are absent by default and change nothing until set in `.docsctl.json`.
+
+- `doc_dirs`: explicit list of extra directories to treat as documentation, beyond `docs/` and the root files — for example `["adr", "architecture"]`. A list rather than a "scan everything" switch, so a code repository does not pull in vendored markdown, changelogs and templates. Absolute paths, `..` escapes, `.` and Windows drive-relative entries are rejected.
+- `docs_are_product`: when true, editing an existing tracked document counts as needing review. Off by default, which keeps the guarantee below that ordinary documentation-only edits finish silently. Turn it on in a repository whose product **is** the documentation, where editing docs is the main activity rather than a side effect of changing code — there, that work would otherwise receive no review at all. Cost: one review continuation per session that touches a document.
 
 ## Package layout
 
