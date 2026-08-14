@@ -835,6 +835,273 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.assertNotIn("--agents both", finish)
         self.assertIn("if scaffold already created it", finish.lower())
 
+    # --- upgrade guard -------------------------------------------------
+
+    def test_snapshot_records_toolkit_version_and_warning_baseline(self) -> None:
+        self.make_v2()
+        snap = docsctl.snapshot(self.repo, "versioned")
+        self.assertEqual(snap["toolkit_version"], docsctl.VERSION)
+        self.assertIn("validation_warnings", snap)
+        self.assertIn("validation_warning_counts", snap)
+
+    def test_stop_rebaselines_instead_of_reporting_when_session_straddles_upgrade(self) -> None:
+        """A baseline written by another toolkit version cannot be trusted.
+
+        Without the guard, checks added by an upgrade mid-session would surface
+        pre-existing conditions as regressions introduced by the current session.
+        """
+        self.make_v2()
+        docsctl.snapshot(self.repo, "straddle")
+        path = docsctl.session_path(self.repo, "straddle")
+        stale = json.loads(path.read_text(encoding="utf-8"))
+        stale["toolkit_version"] = "0.0.1-old"
+        stale["validation_failures"] = []
+        stale["validation_failure_counts"] = {}
+        path.write_text(json.dumps(stale), encoding="utf-8")
+        (self.repo / "docs" / "README.md").write_text(
+            "# Documentation\n\n[dangling](./nope.md)\n", encoding="utf-8"
+        )
+
+        result = hook_common.evaluate_stop({"cwd": str(self.repo), "session_id": "straddle"})
+
+        self.assertEqual(result["action"], "allow", result)
+        refreshed = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(refreshed["toolkit_version"], docsctl.VERSION)
+
+    # --- warning channel -----------------------------------------------
+
+    def test_new_entries_counts_only_what_the_session_added(self) -> None:
+        self.assertEqual(hook_common.new_entries({"a": 1}, None, {"a": 3}, ["a"]), ["a", "a"])
+        self.assertEqual(hook_common.new_entries({"a": 2}, None, {"a": 1}, ["a"]), [])
+        self.assertEqual(hook_common.new_entries(None, ["a"], None, ["a", "b"]), ["b"])
+
+    def test_warning_suffix_caps_and_deprioritises(self) -> None:
+        self.assertEqual(hook_common.warning_suffix([]), "")
+        text = hook_common.warning_suffix([f"warn{i}" for i in range(5)])
+        self.assertIn("do not gate completion", text)
+        self.assertIn("(+2 more)", text)
+        self.assertIn("warn0", text)
+        self.assertNotIn("warn3", text)
+
+    def _breach_memory_budget(self) -> None:
+        model = json.loads((self.repo / ".docsctl.json").read_text(encoding="utf-8"))
+        model["budgets"] = {"memory_max_bytes": 10, "docs_index_max_bytes": 20000}
+        (self.repo / ".docsctl.json").write_text(json.dumps(model), encoding="utf-8")
+        (self.repo / "MEMORY.md").write_text("# Memory\n" + ("x" * 200), encoding="utf-8")
+
+    def test_new_warnings_ride_along_on_a_message_the_hook_already_sends(self) -> None:
+        self.make_v2()
+        docsctl.snapshot(self.repo, "warn")
+        self._breach_memory_budget()
+        # An untracked doc makes the change structural, so the hook speaks.
+        (self.repo / "docs" / "topic.md").write_text("# Topic\n", encoding="utf-8")
+
+        result = hook_common.evaluate_stop({"cwd": str(self.repo), "session_id": "warn"})
+
+        self.assertEqual(result["action"], "continue", result)
+        self.assertEqual(result["kind"], "review", result)
+        self.assertIn("context budget", result["message"])
+        self.assertIn("do not gate completion", result["message"])
+
+    # --- link label, anchors, scope, docs-as-product, reverse index ------
+
+    def test_link_label_naming_a_stale_path_fails_while_honest_spellings_pass(self) -> None:
+        self.make_v2()
+        (self.repo / "docs" / "moved").mkdir()
+        (self.repo / "docs" / "moved" / "topic.md").write_text("# Topic\n", encoding="utf-8")
+        (self.repo / "docs" / "README.md").write_text(
+            "# Documentation\n\n"
+            "[docs/topic.md](moved/topic.md)\n"          # lying: it moved
+            "[moved/topic.md](moved/topic.md)\n"          # honest, repo-relative tail
+            "[./moved/topic.md](moved/topic.md)\n"        # honest, dot-prefixed
+            "[Topic](moved/topic.md)\n",                  # not a path at all
+            encoding="utf-8",
+        )
+
+        result = docsctl.validate(self.repo)
+
+        labels = [f for f in result["failures"] if "link label" in f]
+        self.assertEqual(len(labels), 1, result["failures"])
+        self.assertIn("'docs/topic.md'", labels[0])
+
+    def test_label_check_tolerates_dotted_directories_and_relative_spelling(self) -> None:
+        """Regression: lstrip('./') would eat the dot of '.scratch/…'."""
+        self.assertEqual(docsctl.label_claims_path("`.scratch/README.md`"), ".scratch/README.md")
+        self.assertEqual(docsctl.label_claims_path("./a/b.md"), "a/b.md")
+        self.assertEqual(docsctl.label_claims_path("../product/roadmap.md"), "../product/roadmap.md")
+        self.assertIsNone(docsctl.label_claims_path("Some Title"))
+
+    def test_anchor_pointing_at_a_missing_section_warns_and_valid_one_does_not(self) -> None:
+        self.make_v2()
+        (self.repo / "docs" / "topic.md").write_text(
+            "# Topic\n\n## Real Section\n\ntext\n\n## Real Section\n\nduplicate\n",
+            encoding="utf-8",
+        )
+        (self.repo / "docs" / "README.md").write_text(
+            "# Documentation\n\n"
+            "[ok](topic.md#real-section)\n"
+            "[ok dup](topic.md#real-section-1)\n"
+            "[stale](topic.md#section-that-vanished)\n",
+            encoding="utf-8",
+        )
+
+        result = docsctl.validate(self.repo)
+
+        anchors = [w for w in result["warnings"] if "section that does not exist" in w]
+        self.assertEqual(len(anchors), 1, result["warnings"])
+        self.assertIn("#section-that-vanished", anchors[0])
+        self.assertTrue(result["ok"], result["failures"])
+
+    def test_github_slug_matches_the_shapes_this_repo_actually_uses(self) -> None:
+        self.assertEqual(docsctl.github_slug("4.8 SOAK concluído"), "48-soak-concluído")
+        self.assertEqual(docsctl.github_slug("**Bold** and `code`"), "bold-and-code")
+        self.assertEqual(docsctl.github_slug("Um: dois, três!"), "um-dois-três")
+
+    def test_doc_dirs_extends_scope_only_when_configured(self) -> None:
+        self.make_v2()
+        (self.repo / "adr").mkdir()
+        (self.repo / "adr" / "0001.md").write_text("[gone](./nope.md)\n", encoding="utf-8")
+
+        self.assertTrue(docsctl.validate(self.repo)["ok"])
+
+        model = json.loads((self.repo / ".docsctl.json").read_text(encoding="utf-8"))
+        model["doc_dirs"] = ["adr"]
+        (self.repo / ".docsctl.json").write_text(json.dumps(model), encoding="utf-8")
+
+        result = docsctl.validate(self.repo)
+        self.assertFalse(result["ok"])
+        self.assertTrue(any("adr/0001.md" in f for f in result["failures"]), result["failures"])
+
+    def test_doc_dirs_ignores_absolute_and_escaping_entries(self) -> None:
+        self.make_v2()
+        model = json.loads((self.repo / ".docsctl.json").read_text(encoding="utf-8"))
+        model["doc_dirs"] = ["../outside", "/etc", "", 7, "adr"]
+        (self.repo / ".docsctl.json").write_text(json.dumps(model), encoding="utf-8")
+        self.assertEqual(docsctl.configured_doc_dirs(self.repo), ["adr"])
+
+    def test_docs_are_product_makes_a_tracked_doc_edit_need_review(self) -> None:
+        self.make_v2()
+        docsctl.snapshot(self.repo, "edit")
+        docs_index = self.repo / "docs" / "README.md"
+        docs_index.write_text(docs_index.read_text(encoding="utf-8") + "\nEditorial.\n", encoding="utf-8")
+
+        snap = docsctl.load_snapshot(self.repo, "edit")[0]
+        self.assertFalse(docsctl.impact_report(self.repo, snap)["needs_documentation_review"])
+
+        model = json.loads((self.repo / ".docsctl.json").read_text(encoding="utf-8"))
+        model["docs_are_product"] = True
+        (self.repo / ".docsctl.json").write_text(json.dumps(model), encoding="utf-8")
+
+        self.assertTrue(docsctl.impact_report(self.repo, snap)["needs_documentation_review"])
+
+    def test_reverse_index_finds_documents_that_mention_a_moved_document(self) -> None:
+        self.make_v2()
+        (self.repo / "docs" / "topic.md").write_text("# Topic\n", encoding="utf-8")
+        (self.repo / "docs" / "index-of-things.md").write_text(
+            "# Index\n\nSee [docs/topic.md](topic.md) - current.\n", encoding="utf-8"
+        )
+        commit_all(self.repo, "add docs")
+        docsctl.snapshot(self.repo, "move")
+        (self.repo / "docs" / "archive").mkdir()
+        git(self.repo, "mv", "docs/topic.md", "docs/archive/topic.md")
+
+        report = docsctl.impact_report(self.repo, docsctl.load_snapshot(self.repo, "move")[0])
+
+        self.assertIn("docs/index-of-things.md", report["mentioning_docs"], report)
+
+    def test_reverse_index_skips_bare_generic_names(self) -> None:
+        self.assertEqual(
+            docsctl.mentioning_docs(self.repo, [{"path": "README.md", "after": "M "}]), []
+        )
+
+    # --- fixes from adversarial review ---------------------------------
+
+    def test_label_in_backticks_still_reaches_the_check(self) -> None:
+        """Masking blanks inline code; the visible label must come from the original.
+
+        Backticked labels are the dominant convention in the repositories this
+        check was built for, so losing them would leave the check permanently inert.
+        """
+        self.make_v2()
+        (self.repo / "docs" / "moved").mkdir()
+        (self.repo / "docs" / "moved" / "topic.md").write_text("# Topic\n", encoding="utf-8")
+        (self.repo / "docs" / "README.md").write_text(
+            "# Documentation\n\n[`docs/topic.md`](moved/topic.md)\n", encoding="utf-8"
+        )
+
+        result = docsctl.validate(self.repo)
+
+        self.assertTrue(any("link label" in f for f in result["failures"]), result["failures"])
+
+    def test_heading_with_inline_code_slugs_like_github(self) -> None:
+        """Regression: masking inline code produced 'the-command' and warned on the correct anchor."""
+        self.assertIn("the-run-command", docsctl.anchor_targets("## The `run` command\n"))
+        self.assertNotIn("the-command", docsctl.anchor_targets("## The `run` command\n"))
+
+    def test_setext_headings_produce_anchors(self) -> None:
+        found = docsctl.anchor_targets("Titulo Setext\n=============\n\n## Sub\n")
+        self.assertIn("titulo-setext", found)
+        self.assertIn("sub", found)
+
+    def test_same_file_anchor_is_validated(self) -> None:
+        self.make_v2()
+        (self.repo / "docs" / "topic.md").write_text(
+            "# Topic\n\n## Real\n\n[here](#real)\n\n[gone](#vanished)\n", encoding="utf-8"
+        )
+
+        warns = [w for w in docsctl.validate(self.repo)["warnings"] if "in itself" in w]
+
+        self.assertEqual(len(warns), 1, warns)
+        self.assertIn("#vanished", warns[0])
+
+    def test_unusable_link_target_does_not_abort_validation(self) -> None:
+        """A NUL byte via %00 raised ValueError and killed validate() for the whole repo."""
+        self.make_v2()
+        (self.repo / "docs" / "README.md").write_text(
+            "# Documentation\n\n[bad](bad%00name.md)\n", encoding="utf-8"
+        )
+
+        result = docsctl.validate(self.repo)
+
+        self.assertTrue(any("unusable link target" in f for f in result["failures"]), result)
+
+    def test_doc_dirs_rejects_dot_and_drive_relative(self) -> None:
+        self.make_v2()
+        model = json.loads((self.repo / ".docsctl.json").read_text(encoding="utf-8"))
+        model["doc_dirs"] = [".", "c:", "C:x", "adr"]
+        (self.repo / ".docsctl.json").write_text(json.dumps(model), encoding="utf-8")
+        self.assertEqual(docsctl.configured_doc_dirs(self.repo), ["adr"])
+
+    def test_new_entries_survives_a_malformed_stored_count(self) -> None:
+        self.assertEqual(hook_common.new_entries({"a": None}, None, {"a": 2}, ["a"]), ["a"])
+
+    def test_upgrade_guard_fires_when_the_baseline_predates_the_field(self) -> None:
+        self.make_v2()
+        docsctl.snapshot(self.repo, "old")
+        path = docsctl.session_path(self.repo, "old")
+        stale = json.loads(path.read_text(encoding="utf-8"))
+        stale.pop("toolkit_version", None)
+        path.write_text(json.dumps(stale), encoding="utf-8")
+
+        result = hook_common.evaluate_stop({"cwd": str(self.repo), "session_id": "old"})
+
+        self.assertEqual(result["action"], "allow", result)
+
+    def test_new_warnings_stay_silent_when_the_hook_has_nothing_else_to_say(self) -> None:
+        """Documented limitation: warnings have no channel of their own.
+
+        A session that only modifies tracked docs produces no review and no
+        validation failure, so a new warning is recorded in the baseline but
+        never surfaced. Warnings ride along; they do not summon a message.
+        """
+        self.make_v2()
+        docsctl.snapshot(self.repo, "quiet")
+        self._breach_memory_budget()
+
+        result = hook_common.evaluate_stop({"cwd": str(self.repo), "session_id": "quiet"})
+
+        self.assertEqual(result, {"action": "allow"})
+
 
 if __name__ == "__main__":
     unittest.main()

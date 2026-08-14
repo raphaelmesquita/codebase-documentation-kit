@@ -25,6 +25,54 @@ def repo_from_input(data: dict) -> Path | None:
         return None
 
 
+# Cap on new warnings surfaced in one message. Warnings ride along on a message
+# the hook was already going to send, so they must never dominate it.
+WARNING_CAP = 3
+
+
+def new_entries(
+    stored_counts: object,
+    stored_list: object,
+    current_counts: object,
+    current_list: list[str],
+) -> list[str]:
+    """Entries present now beyond what the baseline already had."""
+    baseline: Counter[str] = Counter()
+    if isinstance(stored_counts, dict):
+        # A snapshot can be hand-edited or written by another version, so a
+        # malformed count must degrade instead of crashing the hook.
+        for entry, count in stored_counts.items():
+            try:
+                baseline[str(entry)] = int(count)
+            except (TypeError, ValueError):
+                baseline[str(entry)] = 1
+    elif isinstance(stored_list, list):
+        baseline = Counter(str(entry) for entry in stored_list)
+    current = Counter(current_counts) if isinstance(current_counts, dict) else Counter(current_list)
+    out: list[str] = []
+    for entry, count in current.items():
+        out.extend([entry] * max(0, count - baseline[entry]))
+    return out
+
+
+def warning_suffix(new_warnings: list[str]) -> str:
+    """Advisory tail appended to a message the hook is already sending.
+
+    Deliberately worded to deprioritise: a warning injected into a working
+    agent's context must not turn into a false-positive hunt mid-task.
+    """
+    if not new_warnings:
+        return ""
+    shown = new_warnings[:WARNING_CAP]
+    hidden = len(new_warnings) - len(shown)
+    more = f" (+{hidden} more)" if hidden > 0 else ""
+    return (
+        " Non-blocking documentation warnings also appeared during this session. "
+        "They do not gate completion: fix one only if it touches what you already changed, "
+        "otherwise leave it. " + "; ".join(shown) + more + "."
+    )
+
+
 def begin(data: dict) -> None:
     root = repo_from_input(data)
     session_id = str(data.get("session_id") or "unknown")
@@ -73,6 +121,14 @@ def evaluate_stop(data: dict) -> dict:
             "message": "Session impact cannot be reconstructed because its baseline snapshot is missing or corrupt. Review the current task documentation manually; automatic gating resumes on the next session baseline.",
         }
 
+    # The baseline was captured by a different toolkit version, so this session
+    # straddles an upgrade. The stored validation deltas cannot be trusted -- the
+    # set of checks may have changed underneath -- and comparing them would report
+    # pre-existing conditions as regressions of this session. Re-baseline and allow.
+    if str(snap.get("toolkit_version") or "") != docsctl.VERSION:
+        docsctl.snapshot(root, session_id)
+        return {"action": "allow"}
+
     report = docsctl.impact_report(root, snap)
     if report.get("impact_indeterminate"):
         return {
@@ -83,30 +139,45 @@ def evaluate_stop(data: dict) -> dict:
         }
     validation = docsctl.validate(root)
 
-    stored_counts = snap.get("validation_failure_counts")
-    if isinstance(stored_counts, dict):
-        baseline_counts = Counter({str(failure): int(count) for failure, count in stored_counts.items()})
-    else:
-        baseline_counts = Counter(snap.get("validation_failures", []))
-    current_counts = Counter(validation.get("failure_counts", Counter(validation["failures"])))
-    new_failures: list[str] = []
-    for failure, count in current_counts.items():
-        new_failures.extend([failure] * max(0, count - baseline_counts[failure]))
+    new_failures = new_entries(
+        snap.get("validation_failure_counts"),
+        snap.get("validation_failures"),
+        validation.get("failure_counts"),
+        validation["failures"],
+    )
+    new_warnings = new_entries(
+        snap.get("validation_warning_counts"),
+        snap.get("validation_warnings"),
+        validation.get("warning_counts"),
+        validation.get("warnings", []),
+    )
     if new_failures:
         problems = new_failures[:6]
         return {
             "action": "continue",
             "kind": "validation",
-            "message": "Documentation model validation found new deterministic failures from this session. Fix only these before finishing: " + "; ".join(problems),
+            "message": "Documentation model validation found new deterministic failures from this session. Fix only these before finishing: "
+            + "; ".join(problems)
+            + "." + warning_suffix(new_warnings),
             "report": report,
         }
 
+    def rebaseline() -> None:
+        docsctl.snapshot(
+            root,
+            session_id,
+            validation["failures"],
+            validation["failure_counts"],
+            validation.get("warnings", []),
+            validation.get("warning_counts"),
+        )
+
     if not report["changed_count"]:
-        docsctl.snapshot(root, session_id, validation["failures"], validation["failure_counts"])
+        rebaseline()
         return {"action": "allow"}
 
     if stop_hook_active:
-        docsctl.snapshot(root, session_id, validation["failures"], validation["failure_counts"])
+        rebaseline()
         return {"action": "allow"}
 
     if report["needs_documentation_review"]:
@@ -119,8 +190,16 @@ def evaluate_stop(data: dict) -> dict:
         )
         if candidates:
             message += f" Candidate docs: {', '.join(candidates)}."
+        mentioning = report.get("mentioning_docs", [])[:5]
+        if mentioning:
+            message += (
+                " These documents mention a changed document by path and may now describe it wrongly: "
+                + ", ".join(mentioning)
+                + "."
+            )
         message += " Update docs or MEMORY.md only if they would otherwise be stale, incomplete, or useful for future steering."
+        message += warning_suffix(new_warnings)
         return {"action": "continue", "kind": "review", "message": message, "report": report}
 
-    docsctl.snapshot(root, session_id, validation["failures"], validation["failure_counts"])
+    rebaseline()
     return {"action": "allow"}

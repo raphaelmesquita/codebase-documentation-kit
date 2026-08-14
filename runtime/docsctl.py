@@ -25,7 +25,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Iterable
 from urllib.parse import unquote
 
-VERSION = "2.1.1"
+VERSION = "2.2.0"
 MODEL_FILE = ".docsctl.json"
 MODEL_SCHEMA = 2
 TOOLKIT_NAME = "codebase-documentation-kit"
@@ -219,6 +219,8 @@ def snapshot(
     session_id: str,
     validation_failures: list[str] | None = None,
     validation_failure_counts: dict[str, int] | None = None,
+    validation_warnings: list[str] | None = None,
+    validation_warning_counts: dict[str, int] | None = None,
 ) -> dict:
     available = git_available(root)
     statuses = porcelain(root) if available else {}
@@ -226,10 +228,21 @@ def snapshot(
         validation = validate(root)
         validation_failures = validation["failures"]
         validation_failure_counts = validation["failure_counts"]
+        if validation_warnings is None:
+            validation_warnings = validation["warnings"]
+            validation_warning_counts = validation["warning_counts"]
     elif validation_failure_counts is None:
         validation_failure_counts = dict(Counter(validation_failures))
+    if validation_warnings is None:
+        validation_warnings = []
+    if validation_warning_counts is None:
+        validation_warning_counts = dict(Counter(validation_warnings))
     snap = {
         "version": 1,
+        # Toolkit version that produced this baseline. A Stop evaluated by a
+        # different version cannot trust the stored validation deltas, because
+        # the set of checks may have changed mid-session, so it re-baselines.
+        "toolkit_version": VERSION,
         "session_id": session_id,
         "repo": str(root),
         "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -242,6 +255,10 @@ def snapshot(
         # blocks only regressions introduced during this session.
         "validation_failures": validation_failures,
         "validation_failure_counts": validation_failure_counts,
+        # Warnings are stored for the same reason: only warnings introduced by
+        # this session are worth surfacing, and only where the hook already speaks.
+        "validation_warnings": validation_warnings,
+        "validation_warning_counts": validation_warning_counts,
     }
     p = session_path(root, session_id)
     p.write_text(json.dumps(snap, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -371,6 +388,60 @@ def classify_path(rel: str) -> str:
     return "other"
 
 
+GENERIC_DOC_STEMS = {"readme", "index", "changelog", "contributing", "license", "memory"}
+REVERSE_INDEX_CAP = 5
+
+
+def mentioning_docs(root: Path, changed: list[dict]) -> list[str]:
+    """Documents that mention a changed document by path.
+
+    The other half of `candidate_docs`: when documentation itself changes, what
+    needs review is whatever asserts something *about* it -- an index describing
+    it, a memory pointing at it. One batched `git grep` for every path at once,
+    because spawning a process per changed file blows the Stop budget on a large
+    session.
+
+    Renames need no special handling here: `porcelain` already records the old
+    path as its own deleted entry, and the old path is the valuable needle --
+    whoever cites the new location is already correct, while the stale reference
+    names where the document used to be.
+    """
+    needles: list[str] = []
+    for item in changed:
+        rel = str(item.get("path") or "").replace("\\", "/")
+        if not rel or classify_path(rel) != "docs":
+            continue
+        # A bare generic name matches half the repository; only path-qualified.
+        if Path(rel).stem.lower() in GENERIC_DOC_STEMS and "/" not in rel:
+            continue
+        if rel not in needles:
+            needles.append(rel)
+    if not needles:
+        return []
+    args = ["git", "-C", str(root), "grep", "-l", "-F", "-I"]
+    for needle in needles[:20]:
+        args += ["-e", needle]
+    args.append("--")
+    try:
+        # Two seconds, not ten: the whole Stop hook has a ten-second budget, and this
+        # runs before validate. Degrading to [] beats losing the entire message.
+        out = subprocess.run(args, text=True, capture_output=True, timeout=2)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if out.returncode not in {0, 1}:
+        return []
+    changed_paths = {str(item.get("path") or "").replace("\\", "/") for item in changed}
+    hits: list[str] = []
+    for line in out.stdout.splitlines():
+        rel = line.strip().replace("\\", "/")
+        if not rel or rel in changed_paths or classify_path(rel) != "docs":
+            continue
+        hits.append(rel)
+        if len(hits) >= REVERSE_INDEX_CAP:
+            break
+    return sorted(hits)
+
+
 def candidate_docs(root: Path, changed: list[dict]) -> list[str]:
     candidates: set[str] = set()
     for item in changed:
@@ -429,7 +500,14 @@ def impact_report(root: Path, snap: dict) -> dict:
         return "??" in status or any(flag in status for flag in ("A", "D", "R", "C"))
 
     docs_structure = any(is_doc_structure_change(item) for item in changed)
-    needs_review = substantive or unknown_change or docs_structure
+    # In a repository whose product IS the documentation, editing an existing
+    # tracked doc is the main activity, not a side effect of changing code. The
+    # default model treats it as ordinary and stays silent, which leaves that
+    # work with no review at all. Opt in per repository; never on by default,
+    # because in a code repository it would speak on every prose touch-up.
+    docs_are_product = bool((read_model(root) or {}).get("docs_are_product"))
+    docs_edited = docs_are_product and any(item["category"] == "docs" for item in changed)
+    needs_review = substantive or unknown_change or docs_structure or docs_edited
     only_tests_or_generated = bool(changed) and all(item["category"] in {"tests", "generated"} for item in changed)
     if only_tests_or_generated:
         needs_review = False
@@ -444,6 +522,7 @@ def impact_report(root: Path, snap: dict) -> dict:
         "changed": changed[:40],
         "changed_truncated": len(changed) > 40,
         "candidate_docs": candidate_docs(root, changed),
+        "mentioning_docs": mentioning_docs(root, changed) if needs_review else [],
     }
 
 
@@ -618,8 +697,14 @@ def normalize_link(raw: str) -> str | None:
     return unquote(path_part) if path_part else None
 
 
-def mask_markdown_code(text: str) -> str:
-    """Mask fenced and inline code while retaining offsets for a small link scanner."""
+def mask_markdown_code(text: str, inline: bool = True) -> str:
+    """Mask code while retaining offsets for a small link scanner.
+
+    `inline=False` masks fenced blocks only. Heading text needs that: a heading
+    such as ``## The `run` command`` slugs to `the-run-command`, and blanking the
+    code span would compute `the-command` -- warning on the correct anchor while
+    passing the wrong one, which is worse than not checking at all.
+    """
     masked = list(text)
     offset = 0
     fence: tuple[str, int] | None = None
@@ -636,6 +721,9 @@ def mask_markdown_code(text: str) -> str:
             for index in range(offset, offset + len(line)):
                 masked[index] = " "
         offset += len(line)
+
+    if not inline:
+        return "".join(masked)
 
     index = 0
     while index < len(masked):
@@ -719,8 +807,13 @@ def reference_definitions(masked: str) -> dict[str, str]:
     return definitions
 
 
-def iter_markdown_links(text: str) -> Iterable[tuple[str, str]]:
-    """Yield (kind, value) pairs for active inline and reference-style links."""
+def iter_markdown_links(text: str) -> Iterable[tuple[str, str, str]]:
+    """Yield (kind, value, label) triples for active inline and reference-style links.
+
+    The visible label travels with the destination so callers can detect a label
+    that names a path the destination no longer satisfies -- the failure mode a
+    plain target check cannot see, because the link still resolves.
+    """
     masked = mask_markdown_code(text)
     definitions = reference_definitions(masked)
     index = 0
@@ -733,11 +826,17 @@ def iter_markdown_links(text: str) -> Iterable[tuple[str, str]]:
             index += 1
             continue
         label = masked[index + 1:label_end]
+        # Detection runs on the masked copy, but the *visible* label must come
+        # from the original: masking blanks inline code, and a label written as
+        # `docs/topic.md` in backticks -- the dominant convention in the
+        # repositories this check was built for -- would otherwise arrive empty
+        # and silently disable the label check.
+        visible = text[index + 1:label_end]
         next_index = label_end + 1
         if next_index < len(masked) and masked[next_index] == "(":
             destination_end = closing_parenthesis(masked, next_index)
             if destination_end is not None:
-                yield "link", masked[next_index + 1:destination_end]
+                yield "link", masked[next_index + 1:destination_end], visible
                 index = destination_end + 1
                 continue
         if next_index < len(masked) and masked[next_index] == "[":
@@ -746,31 +845,131 @@ def iter_markdown_links(text: str) -> Iterable[tuple[str, str]]:
                 reference = masked[next_index + 1:reference_end] or label
                 key = normalized_reference_label(reference)
                 if key in definitions:
-                    yield "link", definitions[key]
+                    yield "link", definitions[key], visible
                 else:
-                    yield "missing-reference", reference
+                    yield "missing-reference", reference, visible
                 index = reference_end + 1
                 continue
         if next_index >= len(masked) or masked[next_index] != ":":
             key = normalized_reference_label(label)
             if key in definitions:
-                yield "link", definitions[key]
+                yield "link", definitions[key], visible
         index = label_end + 1
 
 
+HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$", re.MULTILINE)
+SETEXT_HEADING_RE = re.compile(
+    r"^(?![ \t]*$)(?P<t>[^\r\n]+)\r?\n[ \t]{0,3}(?:=+|-{2,})[ \t]*$", re.MULTILINE
+)
+EXPLICIT_ANCHOR_RE = re.compile(r"""(?:id|name)\s*=\s*["']([^"']+)["']""")
+SLUG_DROP_RE = re.compile(r"[^\w\- ]", re.UNICODE)
+
+
+def github_slug(title: str) -> str:
+    """Approximate GitHub's heading slugger: lowercase, drop punctuation, spaces to hyphens."""
+    text = re.sub(r"<[^>]+>", "", title)
+    text = re.sub(r"[*_`~]", "", text)
+    text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)
+    text = SLUG_DROP_RE.sub("", text.strip().lower())
+    return re.sub(r"\s+", "-", text).strip("-")
+
+
+def anchor_targets(text: str) -> set[str]:
+    """Fragments a document offers: heading slugs (deduped as GitHub does) plus explicit ids."""
+    found: set[str] = set()
+    seen: Counter[str] = Counter()
+    # Fences only: an inline code span is part of the heading text and therefore
+    # part of the slug.
+    masked = mask_markdown_code(text, inline=False)
+    titles: list[tuple[int, str]] = [
+        (m.start(), m.group(1)) for m in HEADING_RE.finditer(masked)
+    ]
+    titles += [(m.start(), m.group(1)) for m in SETEXT_HEADING_RE.finditer(masked)]
+    for _, title in sorted(titles):
+        slug = github_slug(title)
+        if not slug:
+            continue
+        count = seen[slug]
+        seen[slug] += 1
+        found.add(slug if count == 0 else f"{slug}-{count}")
+    for match in EXPLICIT_ANCHOR_RE.finditer(masked):
+        found.add(match.group(1).strip().lower())
+    return found
+
+
+def label_claims_path(label: str) -> str | None:
+    """The path a link label appears to name, if it names one at all."""
+    cleaned = label.strip().strip("`").strip()
+    if not cleaned or " " in cleaned or "\n" in cleaned:
+        return None
+    if not cleaned.lower().endswith(".md"):
+        return None
+    cleaned = cleaned.replace("\\", "/")
+    # Strip a leading "./" prefix only. Never lstrip("./"), which eats the dot of
+    # a legitimate dotted directory such as ".scratch/README.md".
+    while cleaned.startswith("./"):
+        cleaned = cleaned[2:]
+    return cleaned or None
+
+
+def configured_doc_dirs(root: Path) -> list[str]:
+    """Extra directories to treat as documentation, from `doc_dirs` in the model.
+
+    Absent by default, which preserves the historical scope of `docs/` plus the
+    root files. An explicit list -- never a "scan everything" switch -- keeps a
+    code repository from pulling in vendored markdown, changelogs and templates,
+    which would add noise and latency to a hook that runs on every session.
+    """
+    model = read_model(root)
+    if not isinstance(model, dict):
+        return []
+    raw = model.get("doc_dirs")
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for entry in raw:
+        if not isinstance(entry, str):
+            continue
+        candidate = entry.strip().replace("\\", "/")
+        # Reject before normalising: stripping separators first would turn an
+        # absolute "/etc" into a relative "etc" and quietly accept it.
+        if not candidate or candidate.startswith("/") or Path(candidate).is_absolute():
+            continue
+        # ":" catches Windows drive-relative forms such as "c:" or "C:x", which
+        # are not absolute yet still escape the join.
+        if ":" in candidate:
+            continue
+        cleaned = candidate.strip("/").strip()
+        # "." would be the scan-everything switch this function exists to avoid.
+        if not cleaned or cleaned == "." or cleaned == ".." or cleaned.startswith("../") or "/../" in cleaned:
+            continue
+        if cleaned not in out:
+            out.append(cleaned)
+    return out
+
+
 def iter_doc_markdown(root: Path) -> Iterable[Path]:
+    seen: set[Path] = set()
     for name in DOC_ROOT_FILES:
         p = root / name
         if p.is_file():
+            seen.add(p)
             yield p
-    docs = root / "docs"
-    if not docs.exists():
-        return
-    for p in docs.rglob("*.md"):
-        rel = p.relative_to(root)
-        if "_archive" in rel.parts or any(part in IGNORED_DIRS for part in rel.parts):
+    for rel_dir in ["docs", *configured_doc_dirs(root)]:
+        base = root / rel_dir
+        if not base.is_dir():
             continue
-        yield p
+        for p in sorted(base.rglob("*.md")):
+            try:
+                rel = p.relative_to(root)
+            except ValueError:
+                continue
+            if "_archive" in rel.parts or any(part in IGNORED_DIRS for part in rel.parts):
+                continue
+            if p in seen:
+                continue
+            seen.add(p)
+            yield p
 
 
 def extract_recent_delta_rows(text: str) -> list[list[str]]:
@@ -803,6 +1002,12 @@ def validate(root: Path) -> dict:
     failures: list[str] = []
     warnings: list[str] = []
     text_cache: dict[Path, tuple[bool, str | None]] = {}
+    anchor_cache: dict[Path, set[str]] = {}
+
+    def anchors_of(path: Path, content: str) -> set[str]:
+        if path not in anchor_cache:
+            anchor_cache[path] = anchor_targets(content)
+        return anchor_cache[path]
 
     def inspect_text_file(path: Path) -> tuple[bool, str | None]:
         if path in text_cache:
@@ -884,21 +1089,78 @@ def validate(root: Path) -> dict:
         _, text = inspect_text_file(p)
         if text is None:
             continue
-        for kind, raw_link in iter_markdown_links(text):
+        for kind, raw_link, label in iter_markdown_links(text):
+            rel_source = p.relative_to(root).as_posix()
             if kind == "missing-reference":
-                failures.append(f"{p.relative_to(root).as_posix()} has missing reference definition: {raw_link}")
+                failures.append(f"{rel_source} has missing reference definition: {raw_link}")
+                continue
+            # A same-file anchor is discarded by normalize_link, so validate it
+            # here: an intra-document link that rots is the very failure class
+            # these checks exist for.
+            if raw_link.strip().startswith("#"):
+                own = unquote(raw_link.strip()[1:]).strip()
+                if own:
+                    available = anchors_of(p, text)
+                    if available and own.lower() not in available:
+                        warnings.append(
+                            f"{rel_source} links to a section that does not exist in itself: #{own}"
+                        )
                 continue
             link = normalize_link(raw_link)
             if link is None:
                 continue
-            target = (p.parent / link).resolve()
+            try:
+                target = (p.parent / link).resolve()
+            except (OSError, ValueError):
+                # A NUL byte, via %00 through unquote, raises ValueError here.
+                # Left uncaught it would abort validate() for the whole repo.
+                failures.append(f"{rel_source} has an unusable link target: {raw_link}")
+                continue
             try:
                 target.relative_to(root.resolve())
             except ValueError:
-                failures.append(f"{p.relative_to(root).as_posix()} links outside repo: {raw_link}")
+                failures.append(f"{rel_source} links outside repo: {raw_link}")
                 continue
             if not target.exists():
-                failures.append(f"{p.relative_to(root).as_posix()} has missing link target: {raw_link}")
+                failures.append(f"{rel_source} has missing link target: {raw_link}")
+                continue
+
+            rel_target = target.relative_to(root.resolve()).as_posix()
+
+            # A label that spells out a path stops being true when the target
+            # moves, and the link still resolves, so nothing else catches it.
+            # Abbreviating is legitimate ("ops/guide.md" for "../a/ops/guide.md");
+            # naming a path the target does not end with is not.
+            claimed = label_claims_path(label)
+            if claimed is not None:
+                # A label may spell the path either way and both are honest: as a
+                # path relative to this file ("../product/roadmap.md"), or as a
+                # repo-relative path, possibly abbreviated to a trailing portion.
+                try:
+                    claimed_from_here = (p.parent / claimed).resolve() == target
+                except (OSError, ValueError):
+                    claimed_from_here = False
+                if not (
+                    claimed_from_here
+                    or rel_target == claimed
+                    or rel_target.endswith("/" + claimed)
+                ):
+                    failures.append(
+                        f"{rel_source} has a link label naming a path the target does not satisfy: "
+                        f"{label!r} -> {rel_target}"
+                    )
+
+            # Anchors are the ordinary way to cite a section, and a stale one
+            # fails silently: the file resolves and the reader lands at the top.
+            fragment = unquote(raw_link.split("#", 1)[1]).strip() if "#" in raw_link else ""
+            if fragment and target.is_file() and target.suffix.lower() == ".md":
+                _, target_text = inspect_text_file(target)
+                if target_text is not None:
+                    available = anchors_of(target, target_text)
+                    if available and fragment.lower() not in available:
+                        warnings.append(
+                            f"{rel_source} links to a section that does not exist in {rel_target}: #{fragment}"
+                        )
 
     memory = root / "MEMORY.md"
     _, memory_text = inspect_text_file(memory)
@@ -934,11 +1196,13 @@ def validate(root: Path) -> dict:
             failures.append("docs/README.md must be a readable regular file.")
 
     failure_counts = dict(sorted(Counter(failures).items()))
+    warning_counts = dict(sorted(Counter(warnings).items()))
     return {
         "ok": not failures,
         "failures": sorted(failure_counts),
         "failure_counts": failure_counts,
-        "warnings": sorted(set(warnings)),
+        "warnings": sorted(warning_counts),
+        "warning_counts": warning_counts,
     }
 
 
