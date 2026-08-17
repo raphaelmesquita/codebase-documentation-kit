@@ -197,7 +197,14 @@ def evaluate_stop(data: dict) -> dict:
                 + ", ".join(mentioning)
                 + "."
             )
-        message += " Update docs or MEMORY.md only if they would otherwise be stale, incomplete, or useful for future steering."
+        message += (
+            " This list is path-based and misses docs that restate the old fact in their own words,"
+            " or that are stale by omission - also search for the superseded content itself."
+        )
+        message += (
+            " Update docs or MEMORY.md only if they would otherwise be stale, incomplete, or useful"
+            " for future steering - and prune MEMORY.md entries that stopped steering anything."
+        )
         message += warning_suffix(new_warnings)
         return {"action": "continue", "kind": "review", "message": message, "report": report}
 
