@@ -44,6 +44,8 @@ The portable default is:
 - `docs/state/` only when durable project state actually exists.
 - `.docsctl.json` as machine-readable V2 state. Agents should not read it unless needed.
 
+Decide whether the repository's product **is** the documentation (studies, plans, inventories — not code). If so, scaffold with `--docs-are-product`, or set `docs_are_product: true` in `.docsctl.json` on an existing repository, so edits to tracked documents receive maintenance review. Leave it off for code repositories.
+
 Use the template asset matching the file you are creating. Do not load every template.
 
 ## Boundaries

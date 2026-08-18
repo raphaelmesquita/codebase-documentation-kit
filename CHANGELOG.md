@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.3.0 - 2026-08-18
+
+### Mid-session bootstrap ergonomics
+
+Motivated by a docs-as-product repository bootstrapped mid-session: every subsequent Stop repeated "baseline snapshot is missing or corrupt" with no gating for the rest of the session, the wording read as a bug rather than the expected consequence of a mid-session scaffold, and the repository's own `docs_are_product` fit was discovered only after bootstrap because nothing in the architect flow surfaces it.
+
+- **Missing-baseline heal at Stop.** When `Stop` finds no baseline for a v2 session (repository became v2 mid-session, or the session id rotated after SessionStart), it captures one and says so, instead of warning identically on every Stop with gating suspended for the whole session. This **supersedes the 2.2.0 contract** "Stop must not baseline the already-modified tree": nothing is lost silently, because the same Stop that captures the baseline still demands manual review of the earlier changes — and gating now covers everything after the capture point. A **corrupt** baseline is still never overwritten (forensic value) and keeps its own explicit message.
+- **`scaffold --docs-are-product`.** The flag writes `docs_are_product: true` into the marker at scaffold time. Previously the setting existed only in this README/CHANGELOG, invisible to the architect skill flow — precisely for the repositories that need it most (bootstrapping a docs-first repo).
+- **Architect skill surfaces the decision.** The fresh-bootstrap section now instructs the agent to decide whether the repository's product is the documentation and to scaffold with the flag (or set the key on an existing repository).
+- **Version bump.** `VERSION` moves to 2.3.0; the Stop contract changed, and the upgrade guard re-baselines each repository once on the first Stop evaluated by the new version.
+
 ## 2.2.0 - 2026-08-14
 
 ### Documentation integrity checks

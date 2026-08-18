@@ -25,7 +25,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Iterable
 from urllib.parse import unquote
 
-VERSION = "2.2.0"
+VERSION = "2.3.0"
 MODEL_FILE = ".docsctl.json"
 MODEL_SCHEMA = 2
 TOOLKIT_NAME = "codebase-documentation-kit"
@@ -1713,15 +1713,20 @@ def apply_migration(root: Path, plan: dict, force_ambiguous: bool = False) -> di
         }
 
 
-def create_marker(root: Path, agents: list[str], overwrite: bool = False) -> dict:
+def create_marker(root: Path, agents: list[str], overwrite: bool = False, docs_are_product: bool = False) -> dict:
     p = root / MODEL_FILE
     if p.exists() and not overwrite:
         return {"ok": False, "reason": f"{MODEL_FILE} already exists"}
-    p.write_text(json.dumps(default_model(agents), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    model = default_model(agents)
+    # Written only when true, so the marker stays minimal in code repositories
+    # where the flag must remain off by default.
+    if docs_are_product:
+        model["docs_are_product"] = True
+    p.write_text(json.dumps(model, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return {"ok": True, "path": str(p)}
 
 
-def scaffold(root: Path, agents: list[str]) -> dict:
+def scaffold(root: Path, agents: list[str], docs_are_product: bool = False) -> dict:
     """Create only missing, low-risk skeletons. Never overwrite project content."""
     created: list[str] = []
     if not (root / "README.md").exists():
@@ -1763,7 +1768,7 @@ def scaffold(root: Path, agents: list[str]) -> dict:
             encoding="utf-8",
         )
         created.append("docs/README.md")
-    marker = create_marker(root, agents, overwrite=False)
+    marker = create_marker(root, agents, overwrite=False, docs_are_product=docs_are_product)
     if marker.get("ok"):
         created.append(MODEL_FILE)
     return {"ok": True, "created": created, "validation": validate(root)}
@@ -1817,6 +1822,11 @@ def main() -> int:
     p = sub.add_parser("scaffold")
     p.add_argument("repo", nargs="?", default=".")
     p.add_argument("--agents", default="both", choices=["codex", "claude", "both"])
+    p.add_argument(
+        "--docs-are-product",
+        action="store_true",
+        help="mark the repository as documentation-as-product: edits to tracked docs count as needing review",
+    )
     p.add_argument("--json", action="store_true")
 
     p = sub.add_parser("rollback")
@@ -1861,7 +1871,7 @@ def main() -> int:
     elif args.command == "mark":
         obj = create_marker(root, parse_agents(args.agents), args.overwrite)
     elif args.command == "scaffold":
-        obj = scaffold(root, parse_agents(args.agents))
+        obj = scaffold(root, parse_agents(args.agents), docs_are_product=args.docs_are_product)
     elif args.command == "rollback":
         backup = Path(args.backup).expanduser().resolve() if args.backup else None
         obj = rollback_migration(root, backup)

@@ -665,7 +665,13 @@ class RuntimeRegressionTests(unittest.TestCase):
         self.assertEqual(tests_only["action"], "allow")
         self.assertEqual(validate.call_count, 1)
 
-    def test_missing_or_corrupt_stop_snapshot_is_explicitly_indeterminate_without_rebaseline(self) -> None:
+    def test_missing_stop_snapshot_warns_once_heals_and_resumes_gating(self) -> None:
+        # Supersedes the pre-2.3.0 contract "Stop must not baseline the
+        # already-modified tree": a MISSING baseline (repo became v2
+        # mid-session, or the session id rotated) now heals at Stop. Nothing is
+        # lost silently -- the same Stop that captures the baseline demands
+        # manual review of the earlier changes -- and the warning fires once
+        # instead of on every Stop for the rest of the session.
         self.make_v2()
         (self.repo / "src" / "app.py").write_text("VALUE = 9\n", encoding="utf-8")
         missing_path = docsctl.session_path(self.repo, "missing-snapshot")
@@ -673,30 +679,42 @@ class RuntimeRegressionTests(unittest.TestCase):
         missing = hook_common.evaluate_stop({"cwd": str(self.repo), "session_id": "missing-snapshot"})
 
         self.assertEqual((missing["action"], missing["kind"]), ("continue", "impact-indeterminate"))
-        self.assertIn("missing or corrupt", missing["message"])
-        self.assertFalse(missing_path.exists(), "Stop must not baseline the already-modified tree")
+        self.assertIn("No session baseline existed", missing["message"])
+        self.assertIn("baseline was captured now", missing["message"])
+        self.assertTrue(missing_path.exists(), "Stop must heal a missing baseline so gating resumes this session")
+
+        second = hook_common.evaluate_stop({"cwd": str(self.repo), "session_id": "missing-snapshot"})
+        self.assertEqual(second["action"], "allow", "gating resumes silently once the healed baseline exists")
+
+        # Distinct session ids per host: the first hook run heals its session's
+        # baseline, so reusing the id would make the second run gate silently.
+        codex_payload = json.dumps({"hook_event_name": "Stop", "cwd": str(self.repo), "session_id": "host-missing-codex"})
+        codex = subprocess.run(
+            [sys.executable, str(HOOK_CODEX)], input=codex_payload, text=True, capture_output=True, check=True
+        )
+        codex_output = json.loads(codex.stdout)
+        self.assertEqual(codex_output["decision"], "block")
+        self.assertIn("baseline was captured now", codex_output["reason"])
+
+        claude_payload = json.dumps({"hook_event_name": "Stop", "cwd": str(self.repo), "session_id": "host-missing-claude"})
+        claude = subprocess.run(
+            [sys.executable, str(HOOK_CLAUDE)], input=claude_payload, text=True, capture_output=True, check=True
+        )
+        claude_output = json.loads(claude.stdout)["hookSpecificOutput"]
+        self.assertEqual(claude_output["hookEventName"], "Stop")
+        self.assertIn("baseline was captured now", claude_output["additionalContext"])
+
+    def test_corrupt_stop_snapshot_is_explicitly_indeterminate_without_rebaseline(self) -> None:
+        self.make_v2()
+        (self.repo / "src" / "app.py").write_text("VALUE = 9\n", encoding="utf-8")
 
         corrupt_path = docsctl.session_path(self.repo, "corrupt-snapshot")
         corrupt_path.write_text("{not-json", encoding="utf-8")
         corrupt_before = corrupt_path.read_bytes()
         corrupt = hook_common.evaluate_stop({"cwd": str(self.repo), "session_id": "corrupt-snapshot"})
         self.assertEqual((corrupt["action"], corrupt["kind"]), ("continue", "impact-indeterminate"))
+        self.assertIn("corrupt", corrupt["message"])
         self.assertEqual(corrupt_path.read_bytes(), corrupt_before, "Stop must not replace a corrupt baseline")
-
-        payload = json.dumps({"hook_event_name": "Stop", "cwd": str(self.repo), "session_id": "host-missing"})
-        codex = subprocess.run(
-            [sys.executable, str(HOOK_CODEX)], input=payload, text=True, capture_output=True, check=True
-        )
-        codex_output = json.loads(codex.stdout)
-        self.assertEqual(codex_output["decision"], "block")
-        self.assertIn("missing or corrupt", codex_output["reason"])
-
-        claude = subprocess.run(
-            [sys.executable, str(HOOK_CLAUDE)], input=payload, text=True, capture_output=True, check=True
-        )
-        claude_output = json.loads(claude.stdout)["hookSpecificOutput"]
-        self.assertEqual(claude_output["hookEventName"], "Stop")
-        self.assertIn("missing or corrupt", claude_output["additionalContext"])
 
     def test_required_paths_that_become_directories_or_unreadable_emit_valid_stop_feedback(self) -> None:
         self.make_v2()
@@ -993,6 +1011,19 @@ class RuntimeRegressionTests(unittest.TestCase):
         (self.repo / ".docsctl.json").write_text(json.dumps(model), encoding="utf-8")
 
         self.assertTrue(docsctl.impact_report(self.repo, snap)["needs_documentation_review"])
+
+    def test_scaffold_docs_are_product_flag_writes_the_marker_key_only_when_set(self) -> None:
+        result = docsctl.scaffold(self.repo, ["codex", "claude"], docs_are_product=True)
+        self.assertTrue(result["validation"]["ok"], result)
+        model = json.loads((self.repo / docsctl.MODEL_FILE).read_text(encoding="utf-8"))
+        self.assertIs(model.get("docs_are_product"), True)
+
+        plain = self.root / "plain"
+        plain.mkdir()
+        init_git(plain)
+        docsctl.scaffold(plain, ["codex", "claude"])
+        plain_model = json.loads((plain / docsctl.MODEL_FILE).read_text(encoding="utf-8"))
+        self.assertNotIn("docs_are_product", plain_model, "flag must stay absent by default")
 
     def test_reverse_index_finds_documents_that_mention_a_moved_document(self) -> None:
         self.make_v2()

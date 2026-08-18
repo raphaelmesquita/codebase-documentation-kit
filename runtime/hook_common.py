@@ -115,10 +115,26 @@ def evaluate_stop(data: dict) -> dict:
     if snap is None:
         if stop_hook_active:
             return {"action": "allow"}
+        if not docsctl.session_path(root, session_id).exists():
+            # No baseline exists for this session: the repository became v2
+            # mid-session (bootstrap), or the session id rotated after
+            # SessionStart. Capture one now so gating covers everything after
+            # this point. Earlier changes are handed to manual review by this
+            # same message, so nothing is lost silently -- and the warning
+            # fires once instead of on every Stop for the rest of the session.
+            docsctl.snapshot(root, session_id)
+            return {
+                "action": "continue",
+                "kind": "impact-indeterminate",
+                "message": "No session baseline existed (the repository likely became v2 mid-session), so earlier impact cannot be reconstructed. Review the current task documentation manually. A baseline was captured now; automatic gating covers changes made after this point.",
+            }
+        # The baseline file exists but is unreadable or malformed. Never
+        # overwrite it: a corrupt baseline has forensic value, and healing it
+        # would clobber the evidence of what went wrong.
         return {
             "action": "continue",
             "kind": "impact-indeterminate",
-            "message": "Session impact cannot be reconstructed because its baseline snapshot is missing or corrupt. Review the current task documentation manually; automatic gating resumes on the next session baseline.",
+            "message": "Session impact cannot be reconstructed because its baseline snapshot is corrupt. Review the current task documentation manually; the corrupt baseline was left in place and automatic gating resumes on the next session baseline.",
         }
 
     # The baseline was captured by a different toolkit version, so this session

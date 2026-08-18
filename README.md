@@ -23,7 +23,7 @@ Recognized V1 repositories may receive a silent baseline before migration so tha
 Both are absent by default and change nothing until set in `.docsctl.json`.
 
 - `doc_dirs`: explicit list of extra directories to treat as documentation, beyond `docs/` and the root files — for example `["adr", "architecture"]`. A list rather than a "scan everything" switch, so a code repository does not pull in vendored markdown, changelogs and templates. Absolute paths, `..` escapes, `.` and Windows drive-relative entries are rejected.
-- `docs_are_product`: when true, editing an existing tracked document counts as needing review. Off by default, which keeps the guarantee below that ordinary documentation-only edits finish silently. Turn it on in a repository whose product **is** the documentation, where editing docs is the main activity rather than a side effect of changing code — there, that work would otherwise receive no review at all. Cost: one review continuation per session that touches a document.
+- `docs_are_product`: when true, editing an existing tracked document counts as needing review. Off by default, which keeps the guarantee below that ordinary documentation-only edits finish silently. Turn it on in a repository whose product **is** the documentation, where editing docs is the main activity rather than a side effect of changing code — there, that work would otherwise receive no review at all. Cost: one review continuation per session that touches a document. Set it at bootstrap time with `scaffold --docs-are-product`.
 
 ## Package layout
 
